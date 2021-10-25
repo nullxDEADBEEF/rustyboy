@@ -1,9 +1,21 @@
 pub enum Flags {
-    Zero = 0x80,      // set if last operation produced 0, used by conditional jumps
-    Operation = 0x40, // set if last operation was subtraction
-    HalfCarry = 0x20, // set if lower half of the byte overflowed in last operation
-    Carry = 0x10,     // set if last operation produced result over 255 or under 0
-    None = 0x00,
+    Zero,      // set if last operation produced 0, used by conditional jumps
+    Operation, // set if last operation was subtraction
+    HalfCarry, // set if lower half of the byte overflowed in last operation
+    Carry,     // set if last operation produced result over 255 or under 0
+    None,
+}
+
+impl From<Flags> for u8 {
+    fn from(flags: Flags) -> u8 {
+        match flags {
+            Flags::Zero => 0x80,
+            Flags::Operation => 0x40,
+            Flags::HalfCarry => 0x20,
+            Flags::Carry => 0x10,
+            Flags::None => 0x00,
+        }
+    }
 }
 
 pub struct Register {
@@ -37,5 +49,9 @@ impl Register {
             // and instruction found at that location in the ROM is run.
             pc: 0x0100,
         }
+    }
+
+    pub fn get_bc(&self) -> u16 {
+        (self.b as u16) << 8 | self.c as u16
     }
 }

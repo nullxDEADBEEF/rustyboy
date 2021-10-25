@@ -1,5 +1,5 @@
-use std::{convert::TryInto, fs};
 use std::path::Path;
+use std::{convert::TryInto, fs};
 
 use macroquad::prelude::{clear_background, is_key_pressed, next_frame, KeyCode, GREEN};
 
@@ -16,8 +16,9 @@ impl Gameboy {
         Self { cpu: Cpu::new() }
     }
 
-    pub fn load_rom(&mut self, path: &Path) {
-        self.cpu.mmu.working_ram = fs::read(path).unwrap().try_into().unwrap();
+    pub fn load_rom(&mut self, path: &Path) -> Result<()> {
+        self.cpu.mmu.working_ram = fs::read(path)?.try_into().unwrap();
+        Ok(())
     }
 
     pub async fn run(&mut self) {

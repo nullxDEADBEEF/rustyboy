@@ -27,18 +27,4 @@ impl Mmu {
     pub fn read_byte(&self, addr: u8) -> u8 {
         self.working_ram[addr as usize]
     }
-
-    // read 16-bit from addr
-    pub fn read_word(&self, addr: u16) -> u16 {
-        unimplemented!()
-    }
-
-    pub fn write_byte(&self, addr: u8, value: u8) {
-        unimplemented!()
-    }
-
-    // write 16-bit value to addr
-    pub fn write_word(&self, addr: u16, value: u16) {
-        unimplemented!()
-    }
 }

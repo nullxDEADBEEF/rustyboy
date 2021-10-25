@@ -1,7 +1,7 @@
 mod cpu;
-mod register;
 mod gameboy;
 mod mmu;
+mod register;
 mod util;
 
 use std::{env, path::Path};
@@ -14,6 +14,6 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut gameboy = Gameboy::new();
-    gameboy.load_rom(Path::new(&args[1]));
+    gameboy.load_rom(Path::new(&args[1])).unwrap();
     gameboy.run().await;
 }

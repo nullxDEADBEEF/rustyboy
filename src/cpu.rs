@@ -1,4 +1,4 @@
-use crate::{mmu::Mmu, register::Register};
+use crate::{mmu::Mmu, register::Flags, register::Register};
 
 // memory interface can address up to 65536 bytes (16-bit bus)
 // programs are accessed through the same address bus as normal memory
@@ -7,6 +7,7 @@ use crate::{mmu::Mmu, register::Register};
 // timings assume a CPU frequency of 4.19 MHz, called "T-states"
 // because timings are divisble by 4 many specify timings and clock frequency divided by 4, called "M-cycles"
 
+#[allow(dead_code)]
 pub struct Cpu {
     reg: Register,
     pub mmu: Mmu,
@@ -49,10 +50,7 @@ impl Cpu {
         self.m = 3;
         self.t = 12;
 
-        // load one byte into b
-        self.reg.b = self.mmu.working_ram[(self.current_opcode << 8) as usize];
-        // load one byte into c
-        self.reg.c = self.mmu.working_ram[self.current_opcode as usize];
+        self.reg.get_bc();
     }
 
     // load data from register A to the register pair BC
@@ -83,19 +81,24 @@ impl Cpu {
         self.t = 4;
 
         self.reg.b += 1;
+        // set half carry flag if we overflowed the lower 4-bits
+        if self.reg.b & 0xF > 0x8 {
+            self.reg.f = u8::from(Flags::HalfCarry);
+        }
+        if self.reg.b == 0 {
+            self.reg.f = u8::from(Flags::Zero);
+        }
     }
 
     pub fn decode_execute(&mut self) {
-        // something along these lines
         self.current_opcode = self.mmu.read_byte(self.reg.pc as u8);
-        println!("{}", self.current_opcode);
-        // match opcode {
-        //     0x00 => self.nop(),
-        //     0x01 => self.load_bc(),
-        //     0x02 => self.load_bc_a(),
-        //     0x03 => self.inc_bc(),
-        //     0x04 => self.inc_b(),
-        //     _ => println!("not a recognized instruction"),
-        // }
+        match self.current_opcode {
+            0x00 => self.nop(),
+            0x01 => self.load_bc(),
+            0x02 => self.load_bc_a(),
+            0x03 => self.inc_bc(),
+            0x04 => self.inc_b(),
+            _ => println!("{} is not a recognized opcode...", self.current_opcode),
+        }
     }
 }
