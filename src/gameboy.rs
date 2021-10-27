@@ -1,5 +1,6 @@
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
-use std::{convert::TryInto, fs};
 
 use macroquad::prelude::{clear_background, is_key_pressed, next_frame, KeyCode, GREEN};
 
@@ -17,7 +18,10 @@ impl Gameboy {
     }
 
     pub fn load_rom(&mut self, path: &Path) -> Result<()> {
-        self.cpu.mmu.working_ram = fs::read(path)?.try_into().unwrap();
+        let file = File::open(path)?;
+        let mut buf_reader = BufReader::new(file);
+        // load file data into the working ram
+        buf_reader.read_exact(&mut self.cpu.mmu.working_ram)?;
         Ok(())
     }
 
