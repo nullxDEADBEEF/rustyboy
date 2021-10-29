@@ -52,6 +52,7 @@ impl Cpu {
     }
 
     // load data from register A to the register pair BC
+    // TODO: need to test this.
     fn load_bc_a(&mut self) {
         self.m = 2;
         self.t = 8;
@@ -64,6 +65,7 @@ impl Cpu {
     }
 
     // increment register pair BC
+    // TODO: need to test this
     fn inc_bc(&mut self) {
         self.reg.pc += 1;
         self.m = 2;
@@ -81,7 +83,7 @@ impl Cpu {
         self.t = 4;
 
         self.reg.b += 1;
-        self.reg.f |= !(u8::from(Flags::Operation));
+        self.reg.f &= !u8::from(Flags::Operation);
         // set half carry flag if we overflowed the lower 4-bits
         if self.reg.b & 0xF > 0x8 {
             self.reg.f |= u8::from(Flags::HalfCarry);
@@ -200,5 +202,61 @@ mod tests {
         assert_eq!(expected_t_cycles, cpu.t);
         assert_eq!(expected_pc, cpu.reg.pc);
         assert_eq!(expected_bc, cpu.reg.get_bc());
+    }
+
+    #[test]
+    fn test_load_bc_a() {
+        // TODO: test me :))
+    }
+
+    #[test]
+    // TODO: still need to test cases:
+    // when b = 0
+    // when b > 0x8
+    fn test_inc_b() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 1;
+        let expected_t_cycles = 4;
+        let expected_pc = 0x0101;
+        let expected_register_b_value = 1;
+        let expected_register_f_value = 0x0;
+
+        // Act
+        cpu.inc_b();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_register_b_value, cpu.reg.b);
+        assert_eq!(expected_register_f_value, cpu.reg.f);
+    }
+
+    #[test]
+    fn test_dec_b() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 1;
+        let expected_t_cycles = 4;
+        let expected_pc = 0x0101;
+        let expected_register_b_value = 4;
+        let expected_register_f_value = u8::from(Flags::Operation);
+
+        // Act
+        cpu.reg.b = 5;
+        cpu.dec_b();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_register_b_value, cpu.reg.b);
+        assert_eq!(expected_register_f_value, cpu.reg.f);
+
+        cpu.reg.b = 17;
+        cpu.dec_b();
+        let expected_register_f_value = u8::from(Flags::HalfCarry) + u8::from(Flags::Operation);
+        assert_eq!(expected_register_f_value, cpu.reg.f);
     }
 }
