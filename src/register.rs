@@ -29,6 +29,8 @@ pub struct Register {
     pub h: u8,
     pub l: u8,
     // 16-bit registers
+    pub bc: u16,
+    pub hl: u16,
     pub sp: u16,
     pub pc: u16,
 }
@@ -44,14 +46,12 @@ impl Register {
             e: 0,
             h: 0,
             l: 0,
+            bc: 0,
+            hl: 0,
             sp: 0,
             // when the gameboy powers up, pc is set to 0x0100
             // and instruction found at that location in the ROM is run.
             pc: 0x0100,
         }
-    }
-
-    pub fn get_bc(&self) -> u16 {
-        (self.b as u16) << 8 | self.c as u16
     }
 }

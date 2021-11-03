@@ -24,7 +24,11 @@ impl Mmu {
         }
     }
 
-    pub fn read_byte(&self, addr: u8) -> u8 {
-        self.working_ram[addr as usize]
+    pub fn read_byte(&self, addr: usize) -> u8 {
+        self.working_ram[addr]
+    }
+
+    pub fn read_word(&self, addr: usize) -> u16 {
+        (self.working_ram[addr] as u16) << 8 | self.working_ram[addr + 1] as u16
     }
 }
