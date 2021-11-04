@@ -48,16 +48,16 @@ impl Cpu {
         self.m = 3;
         self.t = 12;
 
-        self.reg.bc = self.mmu.read_word(self.reg.pc.into());
+        self.reg.set_bc(self.mmu.read_word(self.reg.pc.into()));
     }
 
-    // load data from register A to the register pair BC
+    // load data from register A to memory location specified by register pair BC
     fn load_bc_a(&mut self) {
         self.reg.pc += 1;
         self.m = 2;
         self.t = 8;
 
-        self.reg.bc = self.reg.a as u16;
+        self.mmu.working_ram[self.reg.get_bc() as usize] = self.reg.a;
     }
 
     // increment register pair BC
@@ -66,7 +66,7 @@ impl Cpu {
         self.m = 2;
         self.t = 8;
 
-        self.reg.bc += 1;
+        self.reg.set_bc(self.reg.get_bc() + 1);
     }
 
     // increment register B
@@ -154,7 +154,25 @@ impl Cpu {
         self.m = 2;
         self.t = 8;
 
-        self.reg.hl += self.reg.bc;
+        self.reg.set_hl(self.reg.get_hl() + self.reg.get_bc());
+        self.reg.f &= !u8::from(Flags::Operation);
+
+        if self.reg.get_hl() > 0x7FA6 {
+            self.reg.f |= u8::from(Flags::Carry);
+            println!("CARRY");
+        } else if self.reg.get_hl() > 0x800 {
+            self.reg.f |= u8::from(Flags::HalfCarry);
+            println!("HALF CARRY");
+        }
+    }
+
+    // load contents specified by reigster BC into register A
+    fn ld_a_bc(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.a = self.mmu.working_ram[self.reg.get_bc() as usize];
     }
 
     pub fn decode_execute(&mut self) {
@@ -170,6 +188,7 @@ impl Cpu {
             0x07 => self.rlca(),
             0x08 => self.load_sp_at_addr(self.current_opcode as u16),
             0x09 => self.add_hl_bc(),
+            0x0A => self.ld_a_bc(),
             _ => println!("{:#X} is not a recognized opcode...", self.current_opcode),
         }
         self.dec_b();
@@ -201,12 +220,11 @@ mod tests {
     fn test_load_bc() {
         // Arrange
         let mut cpu = Cpu::new();
-        cpu.reg.b = 1;
-        cpu.reg.c = 2;
         let expected_m_cycles = 3;
         let expected_t_cycles = 12;
         let expected_pc = cpu.reg.pc + 3;
-        let expected_bc: u16 = (244 << 8) | 128;
+        // 244 << 8 | 128
+        let expected_bc: u16 = 62592;
         cpu.mmu.working_ram[expected_pc as usize] = 244;
         cpu.mmu.working_ram[expected_pc as usize + 1] = 128;
 
@@ -217,7 +235,7 @@ mod tests {
         assert_eq!(expected_m_cycles, cpu.m);
         assert_eq!(expected_t_cycles, cpu.t);
         assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_bc, cpu.reg.bc);
+        assert_eq!(expected_bc, cpu.reg.get_bc());
     }
 
     #[test]
@@ -237,7 +255,7 @@ mod tests {
         assert_eq!(expected_m_cycles, cpu.m);
         assert_eq!(expected_t_cycles, cpu.t);
         assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(register_a as u16, cpu.reg.bc);
+        assert_eq!(register_a, cpu.mmu.working_ram[cpu.reg.get_bc() as usize]);
     }
 
     #[test]
@@ -247,7 +265,7 @@ mod tests {
         let expected_m_cycles = 2;
         let expected_t_cycles = 8;
         let expected_pc = cpu.reg.pc + 1;
-        let expected_register_bc = cpu.reg.bc + 1;
+        let expected_register_bc = cpu.reg.get_bc() + 1;
 
         // Act
         cpu.inc_bc();
@@ -256,7 +274,7 @@ mod tests {
         assert_eq!(expected_m_cycles, cpu.m);
         assert_eq!(expected_t_cycles, cpu.t);
         assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_register_bc, cpu.reg.bc);
+        assert_eq!(expected_register_bc, cpu.reg.get_bc());
     }
 
     #[test]
@@ -327,7 +345,6 @@ mod tests {
         // then we add two to the program counter we arrive
         // at position 0x0102
         cpu.mmu.working_ram[expected_pc as usize] = expected_b_load_value;
-        println!("{:?}", cpu.mmu.working_ram);
 
         // Act
         cpu.load_b();
@@ -405,16 +422,52 @@ mod tests {
         let expected_pc = cpu.reg.pc + 1;
         let expected_hl = 16555;
         let expected_bc = 32678;
+        let expected_f_register = cpu.reg.f & !u8::from(Flags::Operation);
+        let expected_f_register_after_half_carry = u8::from(Flags::HalfCarry);
+        let expected_f_register_after_carry = u8::from(Flags::Carry);
 
         // Act
-        cpu.reg.hl = expected_hl;
-        cpu.reg.bc = expected_bc;
+        cpu.reg.set_hl(expected_hl);
+        cpu.reg.set_bc(expected_bc);
         cpu.add_hl_bc();
 
         // Assert
         assert_eq!(expected_m_cycles, cpu.m);
         assert_eq!(expected_t_cycles, cpu.t);
         assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_hl + expected_bc, cpu.reg.hl);
+        assert_eq!(expected_hl + expected_bc, cpu.reg.get_hl());
+        assert_eq!(expected_f_register_after_carry, cpu.reg.f);
+
+        cpu = Cpu::new();
+        cpu.reg.set_hl(1000);
+        cpu.reg.set_bc(2048);
+        cpu.add_hl_bc();
+        assert_eq!(expected_f_register_after_half_carry, cpu.reg.f);
+
+        cpu = Cpu::new();
+        cpu.reg.set_hl(155);
+        cpu.reg.set_bc(155);
+        cpu.add_hl_bc();
+        assert_eq!(expected_f_register, cpu.reg.f);
+    }
+
+    #[test]
+    fn test_ld_a_bc() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 2;
+        let expected_t_cycles = 8;
+        let expected_pc = cpu.reg.pc + 1;
+        let expected_a = 255;
+        cpu.mmu.working_ram[cpu.reg.get_bc() as usize] = expected_a;
+
+        // Act
+        cpu.ld_a_bc();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_a, cpu.mmu.working_ram[cpu.reg.get_bc() as usize]);
     }
 }
