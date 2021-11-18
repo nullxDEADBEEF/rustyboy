@@ -92,8 +92,7 @@ impl Cpu {
         self.m = 1;
         self.t = 4;
 
-        // TODO: uncomment
-        //self.reg.b -= 1;
+        self.reg.b = self.reg.b.wrapping_sub(1);
         // set operation flag since we subtracted
         self.reg.f |= u8::from(Flags::Operation);
 
@@ -154,7 +153,8 @@ impl Cpu {
         self.m = 2;
         self.t = 8;
 
-        self.reg.set_hl(self.reg.get_hl() + self.reg.get_bc());
+        self.reg
+            .set_hl(self.reg.get_hl().wrapping_add(self.reg.get_bc()));
         self.reg.f &= !u8::from(Flags::Operation);
 
         if self.reg.get_hl() > 0x7FA6 {
@@ -166,13 +166,75 @@ impl Cpu {
         }
     }
 
-    // load contents specified by reigster BC into register A
+    // load contents specified by register BC into register A
     fn ld_a_bc(&mut self) {
         self.reg.pc += 1;
         self.m = 2;
         self.t = 8;
 
         self.reg.a = self.mmu.working_ram[self.reg.get_bc() as usize];
+    }
+
+    // decrement register pair BC by 1
+    fn dec_bc(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.set_bc(self.reg.get_bc() - 1);
+    }
+
+    // increment contents of register C by 1
+    fn inc_c(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.c += 1;
+        self.reg.f &= !u8::from(Flags::Operation);
+        if self.reg.c == 0 {
+            self.reg.f |= u8::from(Flags::Zero);
+        } else if self.reg.c > 0x8 {
+            self.reg.f |= u8::from(Flags::HalfCarry);
+        }
+    }
+
+    // decrement contents of register C by 1
+    fn dec_c(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.c = self.reg.c.wrapping_sub(1);
+        self.reg.f |= u8::from(Flags::Operation);
+        if self.reg.c == 0 {
+            self.reg.f |= u8::from(Flags::Zero);
+        } else if self.reg.c & 0xF == 0 {
+            self.reg.f |= u8::from(Flags::HalfCarry);
+        }
+    }
+
+    // load immediate operand into register C
+    fn ld_c(&mut self) {
+        self.reg.pc += 2;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.c = self.mmu.working_ram[self.reg.pc as usize];
+    }
+
+    // Rotate contents of register A to the right
+    fn rrca(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        // TODO: refactor this into a function, everywhere
+        self.reg.f &= !u8::from(Flags::Zero);
+        self.reg.f &= !u8::from(Flags::Operation);
+        self.reg.f &= !u8::from(Flags::HalfCarry);
+
+        self.reg.a = (self.reg.a >> 1) | (if self.reg.a & 0x01 == 0x01 { 0x80 } else { 0 })
     }
 
     pub fn decode_execute(&mut self) {
@@ -189,6 +251,11 @@ impl Cpu {
             0x08 => self.load_sp_at_addr(self.current_opcode as u16),
             0x09 => self.add_hl_bc(),
             0x0A => self.ld_a_bc(),
+            0x0B => self.dec_bc(),
+            0x0C => self.inc_c(),
+            0x0D => self.dec_c(),
+            0x0E => self.ld_c(),
+            0x0F => self.rrca(),
             _ => println!("{:#X} is not a recognized opcode...", self.current_opcode),
         }
         self.dec_b();
@@ -469,5 +536,137 @@ mod tests {
         assert_eq!(expected_t_cycles, cpu.t);
         assert_eq!(expected_pc, cpu.reg.pc);
         assert_eq!(expected_a, cpu.mmu.working_ram[cpu.reg.get_bc() as usize]);
+    }
+
+    #[test]
+    fn test_dec_bc() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 2;
+        let expected_t_cycles = 8;
+        let expected_pc = cpu.reg.pc + 1;
+        let expected_bc = 9;
+        cpu.reg.set_bc(10);
+
+        // Act
+        cpu.dec_bc();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_bc, cpu.reg.get_bc());
+    }
+
+    #[test]
+    fn test_inc_c() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 1;
+        let expected_t_cycles = 4;
+        let expected_pc = cpu.reg.pc + 1;
+        let expected_c = 241;
+        cpu.reg.c = 240;
+
+        // Act
+        cpu.inc_c();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_c, cpu.reg.c);
+        assert_eq!(
+            cpu.reg.f & !u8::from(Flags::Operation) | u8::from(Flags::HalfCarry),
+            cpu.reg.f
+        );
+    }
+
+    #[test]
+    fn test_dec_c() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 1;
+        let expected_t_cycles = 4;
+        let expected_pc = cpu.reg.pc + 1;
+        let expected_c = 24;
+        cpu.reg.c = 25;
+
+        // Act
+        cpu.dec_c();
+
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_c, cpu.reg.c);
+
+        cpu = Cpu::new();
+        cpu.reg.c = 1;
+        cpu.dec_c();
+        println!("{}", cpu.reg.c);
+
+        assert_eq!(
+            u8::from(Flags::Operation) | u8::from(Flags::Zero),
+            cpu.reg.f
+        );
+
+        cpu = Cpu::new();
+        cpu.reg.c = 17;
+        cpu.dec_c();
+
+        assert_eq!(
+            u8::from(Flags::Operation) | u8::from(Flags::HalfCarry),
+            cpu.reg.f
+        );
+    }
+
+    #[test]
+    fn test_ld_c() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 2;
+        let expected_t_cycles = 8;
+        let expected_pc = cpu.reg.pc + 2;
+        let expected_c = 25;
+        cpu.mmu.working_ram[expected_pc as usize] = 25;
+
+        // Act
+        cpu.ld_c();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_c, cpu.reg.c);
+    }
+
+    #[test]
+    fn test_rrca() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 1;
+        let expected_t_cycles = 4;
+        let expected_pc = cpu.reg.pc + 1;
+        let expected_register_f = u8::from(Flags::None);
+        // 240 >> 1
+        let expected_a = 120;
+        cpu.reg.a = 240;
+
+        // Act
+        cpu.rrca();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_register_f, cpu.reg.f);
+        assert_eq!(expected_a, cpu.reg.a);
+
+        cpu = Cpu::new();
+        let expected_a = 248;
+        cpu.reg.a = 241;
+        cpu.rrca();
+
+        assert_eq!(expected_a, cpu.reg.a);
     }
 }

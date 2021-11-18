@@ -2,7 +2,8 @@
 
 // NOTE: "word" in this context means 16-bit
 
-const WORKING_RAM_BYTES: usize = 0x8000;
+// TODO: change back to 0x8000
+const WORKING_RAM_BYTES: usize = 0x10000;
 const VIDEO_RAM_BYTES: usize = 0x8000;
 const ZERO_PAGE_RAM_BYTES: usize = 0x80;
 

@@ -12,6 +12,7 @@ pub struct Gameboy {
     pub cpu: Cpu,
 }
 
+#[allow(clippy::unused_io_amount)]
 impl Gameboy {
     pub fn new() -> Self {
         Self { cpu: Cpu::new() }
@@ -21,7 +22,7 @@ impl Gameboy {
         let file = File::open(path)?;
         let mut buf_reader = BufReader::new(file);
         // load file data into the working ram
-        buf_reader.read_exact(&mut self.cpu.mmu.working_ram)?;
+        buf_reader.read(&mut self.cpu.mmu.working_ram)?;
         Ok(())
     }
 
