@@ -35,6 +35,12 @@ impl Cpu {
         }
     }
 
+    fn reset_flags(&mut self) {
+        self.reg.f &= !u8::from(Flags::Zero);
+        self.reg.f &= !u8::from(Flags::HalfCarry);
+        self.reg.f &= !u8::from(Flags::Carry);
+    }
+
     // no operation, only advances the program counter by 1
     fn nop(&mut self) {
         self.reg.pc += 1;
@@ -122,10 +128,7 @@ impl Cpu {
         self.m = 1;
         self.t = 4;
 
-        self.reg.f &= !u8::from(Flags::Zero);
-        self.reg.f &= !u8::from(Flags::HalfCarry);
-        self.reg.f &= !u8::from(Flags::Operation);
-
+        self.reset_flags();
         self.reg.a = (self.reg.a << 1)
             | (if self.reg.a & u8::from(Flags::Zero) == 0x80 {
                 1
@@ -229,12 +232,135 @@ impl Cpu {
         self.m = 1;
         self.t = 4;
 
-        // TODO: refactor this into a function, everywhere
-        self.reg.f &= !u8::from(Flags::Zero);
-        self.reg.f &= !u8::from(Flags::Operation);
-        self.reg.f &= !u8::from(Flags::HalfCarry);
-
+        self.reset_flags();
         self.reg.a = (self.reg.a >> 1) | (if self.reg.a & 0x01 == 0x01 { 0x80 } else { 0 })
+    }
+
+    // stop system clock and oscillator circuit
+    fn stop(&mut self) {}
+
+    // load 2 bytes of immediate data into register pair DE
+    fn ld_de(&mut self) {
+        self.reg.pc += 3;
+        self.m = 3;
+        self.t = 12;
+
+        self.reg.set_de(self.mmu.read_word(self.reg.pc.into()));
+    }
+
+    // store contents of register A in memory location specified by register pair DE
+    fn ld_a(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.mmu.working_ram[self.reg.get_de() as usize] = self.reg.a;
+    }
+
+    // increment contents of register pair DE by 1
+    fn inc_de(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.set_de(self.reg.get_de().wrapping_add(1));
+    }
+
+    // increment contents of register D by 1
+    // TODO: check that the flags are set correctly
+    fn inc_d(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.d = self.reg.d.wrapping_add(1);
+        self.reg.f &= !u8::from(Flags::Operation);
+        if self.reg.d == 0 {
+            self.reg.f |= u8::from(Flags::Zero);
+        } else if self.reg.d & 0x8 == 0 {
+            self.reg.f |= u8::from(Flags::HalfCarry);
+        }
+    }
+
+    // decrement contents of register D by 1
+    // TODO: check that flags are set correctly
+    fn dec_d(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.d = self.reg.d.wrapping_sub(1);
+        self.reg.f |= u8::from(Flags::Operation);
+        if self.reg.d == 0 {
+            self.reg.f |= u8::from(Flags::Zero);
+        } else if self.reg.d & 0xF == 0 {
+            self.reg.f |= u8::from(Flags::HalfCarry);
+        }
+    }
+
+    // load 8-bit immediate operand into register D
+    // TODO: check that correct 8-bit operand is loaded in
+    fn ld_d(&mut self) {
+        self.reg.pc += 2;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.d = self.mmu.read_byte(self.reg.pc.into());
+    }
+
+    // rotate contents of register A to the left, through the carry flag
+    // TODO: check if contents of carry flag are copied correctly
+    fn rla(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reset_flags();
+        self.reg.a = (self.reg.a << 1) | (if self.reg.a & 0x80 == 0x80 { 1 } else { 0 })
+    }
+
+    // jump s8 steps from current address in the pc
+    // TODO: check up on correct implementation
+    fn jr(&mut self) {
+        self.reg.pc += 2;
+        self.m = 3;
+        self.t = 12;
+
+        self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+    }
+
+    // add contents of register pair DE to the contents of register pair HL
+    fn add_hl_de(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg
+            .set_hl(self.reg.get_hl().wrapping_add(self.reg.get_de()));
+        self.reg.f &= !u8::from(Flags::Operation);
+        if self.reg.get_hl() & 0x800 == 0 {
+            self.reg.f |= u8::from(Flags::HalfCarry);
+        } else if self.reg.get_hl() & 0x8000 == 0 {
+            self.reg.f |= u8::from(Flags::Carry);
+        }
+    }
+
+    // load 8-bit contents of memory specified by register pair DE into register A
+    fn ld_a_de(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.a = self.mmu.working_ram[self.reg.get_de() as usize];
+    }
+
+    // decrement contents of register pair DE by 1
+    fn dec_de(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.set_de(self.reg.get_de().wrapping_sub(1));
     }
 
     pub fn decode_execute(&mut self) {
@@ -256,6 +382,18 @@ impl Cpu {
             0x0D => self.dec_c(),
             0x0E => self.ld_c(),
             0x0F => self.rrca(),
+            0x10 => self.stop(),
+            0x11 => self.ld_de(),
+            0x12 => self.ld_a(),
+            0x13 => self.inc_de(),
+            0x14 => self.inc_d(),
+            0x15 => self.dec_d(),
+            0x16 => self.ld_d(),
+            0x17 => self.rla(),
+            0x18 => self.jr(),
+            0x19 => self.add_hl_de(),
+            0x1A => self.ld_a_de(),
+            0x1B => self.dec_de(),
             _ => println!("{:#X} is not a recognized opcode...", self.current_opcode),
         }
         self.dec_b();
@@ -668,5 +806,27 @@ mod tests {
         cpu.rrca();
 
         assert_eq!(expected_a, cpu.reg.a);
+    }
+
+    #[test]
+    fn test_ld_de() {
+        // Arrange
+        let mut cpu = Cpu::new();
+        let expected_m_cycles = 3;
+        let expected_t_cycles = 12;
+        let expected_pc = cpu.reg.pc + 3;
+        // 244 << 8 | 128
+        let expected_de: u16 = 62592;
+        cpu.mmu.working_ram[expected_pc as usize] = 244;
+        cpu.mmu.working_ram[expected_pc as usize + 1] = 128;
+
+        // Act
+        cpu.ld_de();
+
+        // Assert
+        assert_eq!(expected_m_cycles, cpu.m);
+        assert_eq!(expected_t_cycles, cpu.t);
+        assert_eq!(expected_pc, cpu.reg.pc);
+        assert_eq!(expected_de, cpu.reg.get_de());
     }
 }
