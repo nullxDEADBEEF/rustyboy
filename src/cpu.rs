@@ -53,6 +53,10 @@ impl Cpu {
         self.reg.f &= !u8::from(flag);
     }
 
+    fn flag_is_active(&self, flag: Flags) -> bool {
+        self.reg.f & u8::from(flag.clone()) == u8::from(flag)
+    }
+
     // no operation, only advances the program counter by 1
     fn nop(&mut self) {
         self.reg.pc += 1;
@@ -504,13 +508,287 @@ impl Cpu {
     }
 
     // Decimal Adjust Accumulator, get binary-coded decimal representation after an arithmetic instruction
+    // binary-coded decimal is a binary encoding of decimal numbers where each digit is represented
+    // by a fixed number of bits, usually 4 or 8
     fn daa(&mut self) {
         self.reg.pc += 1;
         self.m = 1;
         self.t = 4;
 
-        if self.reg.f & self.get_flag(Flags::Carry) == 0x10 || self.reg.a & 0xF > 0x9 {
-            self.reg.a |= 0x06
+        // after addition
+        if !self.get_flag(Flags::Operation) == 0 {
+            if self.flag_is_active(Flags::HalfCarry) || self.reg.a & 0xF > 0x9 {
+                self.reg.a = self.reg.a.wrapping_add(0x6);
+            }
+            if self.flag_is_active(Flags::Carry) || self.reg.a > 0x99 {
+                self.reg.a = self.reg.a.wrapping_add(0x60);
+                self.set_flag(Flags::Carry);
+            }
+        } else {
+            // after subtraction
+            if self.flag_is_active(Flags::Carry) {
+                self.reg.a = self.reg.a.wrapping_sub(0x60);
+            }
+            if self.flag_is_active(Flags::HalfCarry) {
+                self.reg.a = self.reg.a.wrapping_sub(0x6);
+            }
+        }
+
+        if self.reg.a == 0 {
+            self.set_flag(Flags::Zero);
+        }
+        self.unset_flag(Flags::HalfCarry);
+    }
+
+    // if z flag is active, jump s8 steps from current address else instruction following
+    // is executed
+    fn jr_z(&mut self) {
+        self.reg.pc += 2;
+        self.m = 2;
+        self.t = 8;
+
+        if self.flag_is_active(Flags::Zero) {
+            self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+        }
+    }
+
+    // add contents of register pair HL to the contents of register pair HL and store in HL
+    fn add_hl_hl(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg
+            .set_hl(self.reg.get_hl().wrapping_add(self.reg.get_hl()));
+        self.unset_flag(Flags::Operation);
+        if self.reg.get_hl() & 0x800 == 0 {
+            self.set_flag(Flags::HalfCarry);
+        } else if self.reg.get_hl() & 0x8000 == 0 {
+            self.set_flag(Flags::Carry);
+        }
+    }
+
+    // load contents of memory specified by register pair HL into register A and increase
+    // contents of HL
+    fn ld_a_hl_plus(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.a = self.mmu.working_ram[self.reg.get_hl() as usize];
+        self.reg.set_hl(self.reg.get_hl().wrapping_add(1));
+    }
+
+    // decrement contents of register pair HL by 1
+    fn dec_hl(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.set_hl(self.reg.get_hl().wrapping_sub(1));
+    }
+
+    // increment contents of register L by 1
+    fn inc_l(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.l = self.reg.l.wrapping_add(1);
+        self.unset_flag(Flags::Operation);
+        if self.reg.l == 0 {
+            self.set_flag(Flags::Zero);
+        } else if self.reg.l & 0x8 == 0 {
+            self.set_flag(Flags::HalfCarry);
+        }
+    }
+
+    // decrement contents of register L by 1
+    fn dec_l(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.l = self.reg.l.wrapping_sub(1);
+        self.set_flag(Flags::Operation);
+        if self.reg.l == 0 {
+            self.set_flag(Flags::Zero);
+        } else if self.reg.l > 0xF {
+            self.set_flag(Flags::HalfCarry);
+        }
+    }
+
+    // load 8-bit immediate operand into register L
+    fn ld_l(&mut self) {
+        self.reg.pc += 2;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.l = self.mmu.read_byte(self.reg.pc.into());
+    }
+
+    // flip all contents of register A
+    fn cpl(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.a = !self.reg.a;
+        self.set_flag(Flags::Operation);
+        self.set_flag(Flags::HalfCarry);
+    }
+
+    // if CY flag is not set, jump s8 steps from current address
+    // else instruction following JP is executed
+    fn jr_nc(&mut self) {
+        self.reg.pc += 2;
+        self.m = 2;
+        self.t = 8;
+
+        if !self.flag_is_active(Flags::Carry) {
+            self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+        }
+    }
+
+    // load 2 bytes of immediate data into register pair SP
+    fn ld_sp(&mut self) {
+        self.reg.pc += 3;
+        self.m = 3;
+        self.t = 12;
+
+        self.reg.sp = self.mmu.read_word(self.reg.pc.into());
+    }
+
+    // store contents of register A in memory location specified by register pair HL
+    // and decrement contents of HL
+    fn ld_hlm_a(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.mmu.working_ram[self.reg.get_hl() as usize] = self.reg.a;
+        self.reg.set_hl(self.reg.get_hl().wrapping_sub(1));
+    }
+
+    // increment contents of register pair SP by 1
+    fn inc_sp(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.sp = self.reg.sp.wrapping_add(1);
+    }
+
+    // increment contents of memory specified by register pair HL by 1
+    fn inc_content_at_hl(&mut self) {
+        self.reg.pc += 1;
+        self.m = 3;
+        self.t = 12;
+
+        self.mmu.working_ram[self.reg.get_hl() as usize] += 1;
+        self.unset_flag(Flags::Operation);
+        if self.mmu.working_ram[self.reg.get_hl() as usize] == 0 {
+            self.set_flag(Flags::Zero);
+        } else if self.mmu.working_ram[self.reg.get_hl() as usize] & 0xF == 0 {
+            self.set_flag(Flags::HalfCarry);
+        }
+    }
+
+    // decrement contents of memory specifed by register pair HL by 1
+    fn dec_content_at_hl(&mut self) {
+        self.reg.pc += 1;
+        self.m = 3;
+        self.t = 12;
+
+        self.mmu.working_ram[self.reg.get_hl() as usize] -= 1;
+        self.set_flag(Flags::Operation);
+        if self.mmu.working_ram[self.reg.get_hl() as usize] == 0 {
+            self.set_flag(Flags::Zero);
+        } else if self.mmu.working_ram[self.reg.get_hl() as usize] & 0xF == 0 {
+            self.set_flag(Flags::HalfCarry);
+        }
+    }
+
+    // store contents of 8-bit immediate operation into memory location
+    // specified by register pair HL
+    fn ld_hl_byte(&mut self) {
+        self.reg.pc += 2;
+        self.m = 3;
+        self.t = 12;
+
+        self.mmu.working_ram[self.reg.get_hl() as usize] = self.mmu.read_byte(self.reg.pc.into());
+    }
+
+    // set the carry flag
+    fn scf(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.set_flag(Flags::Carry);
+    }
+
+    // if carry flag is active, jump s8 steps from current address
+    // else instruction following jp is executed
+    fn jr_c(&mut self) {
+        self.reg.pc += 2;
+        self.m = 2;
+        self.t = 8;
+
+        if self.flag_is_active(Flags::Carry) {
+            self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+        } else {
+            self.reg.pc += 1;
+        }
+    }
+
+    // add contents of register pair SP to contents of register pair HL
+    fn add_hl_sp(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.set_hl(self.reg.get_hl().wrapping_add(self.reg.sp));
+        self.unset_flag(Flags::Operation);
+        if self.reg.get_hl() & 0x800 == 0 {
+            self.set_flag(Flags::HalfCarry);
+        } else if self.reg.get_hl() & 0x8000 == 0 {
+            self.set_flag(Flags::Carry);
+        }
+    }
+
+    // load contents specified by register pair HL into register A
+    // decrement contents of HL
+    fn ld_a_hl_dec(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.a = self.mmu.working_ram[self.reg.get_hl() as usize];
+        self.reg.set_hl(self.reg.get_hl().wrapping_sub(1));
+    }
+
+    // decrement contents of register pair SP by 1
+    fn dec_sp(&mut self) {
+        self.reg.pc += 1;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.sp = self.reg.sp.wrapping_sub(1);
+    }
+
+    // increment contents of register A by 1
+    fn inc_a(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.a = self.reg.a.wrapping_add(1);
+        self.unset_flag(Flags::Operation);
+        if self.reg.a == 0 {
+            self.set_flag(Flags::Zero);
+        } else if self.reg.a & 0x8 == 0 {
+            self.set_flag(Flags::HalfCarry);
         }
     }
 
@@ -557,6 +835,27 @@ impl Cpu {
             0x25 => self.dec_h(),
             0x26 => self.ld_h(),
             0x27 => self.daa(),
+            0x28 => self.jr_z(),
+            0x29 => self.add_hl_hl(),
+            0x2A => self.ld_a_hl_plus(),
+            0x2B => self.dec_hl(),
+            0x2C => self.inc_l(),
+            0x2D => self.dec_l(),
+            0x2E => self.ld_l(),
+            0x2F => self.cpl(),
+            0x30 => self.jr_nc(),
+            0x31 => self.ld_sp(),
+            0x32 => self.ld_hlm_a(),
+            0x33 => self.inc_sp(),
+            0x34 => self.inc_content_at_hl(),
+            0x35 => self.dec_content_at_hl(),
+            0x36 => self.ld_hl_byte(),
+            0x37 => self.scf(),
+            0x38 => self.jr_c(),
+            0x39 => self.add_hl_sp(),
+            0x3A => self.ld_a_hl_dec(),
+            0x3B => self.dec_sp(),
+            0x3C => self.inc_a(),
             _ => println!("{:#X} is not a recognized opcode...", self.current_opcode),
         }
         self.dec_b();

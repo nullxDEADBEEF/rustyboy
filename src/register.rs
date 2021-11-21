@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub enum Flags {
     Zero,      // set if last operation produced 0, used by conditional jumps
     Operation, // set if last operation was subtraction
