@@ -35,6 +35,7 @@ impl Cpu {
         }
     }
 
+    // --------------------------- UTIL -----------------------------------------------
     fn reset_flags(&mut self) {
         self.reg.f &= !u8::from(Flags::Zero);
         self.reg.f &= !u8::from(Flags::HalfCarry);
@@ -56,6 +57,42 @@ impl Cpu {
     fn flag_is_active(&self, flag: Flags) -> bool {
         self.reg.f & u8::from(flag.clone()) == u8::from(flag)
     }
+
+    fn get_src_register(&self, src_register: u8) -> u8 {
+        match src_register {
+            0 => self.reg.b,
+            1 => self.reg.c,
+            2 => self.reg.d,
+            3 => self.reg.e,
+            4 => self.reg.h,
+            5 => self.reg.l,
+            6 => self.mmu.working_ram[self.reg.get_hl() as usize],
+            7 => self.reg.a,
+            _ => {
+                println!("Didnt find a source register, got: {}", src_register);
+                u8::MAX
+            }
+        }
+    }
+
+    fn set_register(&mut self, dest_register: u8, src_register: u8) {
+        match dest_register {
+            0 => self.reg.b = self.get_src_register(src_register),
+            1 => self.reg.c = self.get_src_register(src_register),
+            2 => self.reg.d = self.get_src_register(src_register),
+            3 => self.reg.e = self.get_src_register(src_register),
+            4 => self.reg.h = self.get_src_register(src_register),
+            5 => self.reg.l = self.get_src_register(src_register),
+            6 => {
+                self.mmu.working_ram[self.reg.get_hl() as usize] =
+                    self.get_src_register(src_register)
+            }
+            7 => self.reg.a = self.get_src_register(src_register),
+            _ => println!("Didnt find a destination register, got: {}", dest_register),
+        }
+    }
+
+    // --------------------------- OPCODES -----------------------------------------------
 
     // no operation, only advances the program counter by 1
     fn nop(&mut self) {
@@ -154,16 +191,16 @@ impl Cpu {
     }
 
     // load stack pointer at given address
-    fn load_sp_at_addr(&mut self, addr: u16) {
+    fn load_sp_at_addr(&mut self) {
         self.reg.pc += 3;
         self.m = 5;
         self.t = 20;
 
         // store lower byte of sp at addr
-        self.mmu.working_ram[addr as usize] = self.reg.sp as u8;
+        self.mmu.working_ram[self.reg.pc as usize] = self.reg.sp as u8;
 
         // store upper byte of sp at addr + 1
-        self.mmu.working_ram[addr as usize + 1] = (self.reg.sp >> 8 & 0xFF) as u8;
+        self.mmu.working_ram[self.reg.pc as usize + 1] = (self.reg.sp >> 8 & 0xFF) as u8;
     }
 
     // add register BC to HL
@@ -436,6 +473,8 @@ impl Cpu {
 
         if self.reg.f & self.get_flag(Flags::Zero) == 0 {
             self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+        } else {
+            self.reg.pc += 1;
         }
     }
 
@@ -549,6 +588,8 @@ impl Cpu {
 
         if self.flag_is_active(Flags::Zero) {
             self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+        } else {
+            self.reg.pc += 1;
         }
     }
 
@@ -647,6 +688,8 @@ impl Cpu {
 
         if !self.flag_is_active(Flags::Carry) {
             self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+        } else {
+            self.reg.pc += 1;
         }
     }
 
@@ -792,8 +835,198 @@ impl Cpu {
         }
     }
 
+    // decrement contents of register A by 1
+    fn dec_a(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.reg.a = self.reg.a.wrapping_sub(1);
+        self.set_flag(Flags::Operation);
+        if self.reg.a == 0 {
+            self.set_flag(Flags::Zero);
+        } else if self.reg.a & 0x8 == 0 {
+            self.set_flag(Flags::HalfCarry);
+        }
+    }
+
+    // load 8-bit immediate operand into register A
+    fn ld_a_byte(&mut self) {
+        self.reg.pc += 2;
+        self.m = 2;
+        self.t = 8;
+
+        self.reg.a = self.mmu.read_byte(self.reg.pc.into());
+    }
+
+    // flip carry flag
+    // TODO: check this for correctness
+    fn ccf(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        self.unset_flag(Flags::Operation);
+        self.unset_flag(Flags::HalfCarry);
+        self.reg.f ^= u8::from(Flags::Carry);
+    }
+
+    // parses the opcodes from 0x40 to 0x7F
+    // also handles the case of 0x76 which is the HALT opcode
+    fn parse_load_opcodes(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        // HALT opcode
+        if self.current_opcode == 0x76 {
+            self.halted = true;
+        } else {
+            // LD opcodes
+            // we can figure out what register to load what data into
+            // by looking at the binary representation of the opcodes
+            // we can see that the lowest 3-bits represents our
+            // index we want to load from, and by shifting 3 bits to the right
+            // we get the register we want to load into.
+            // So we get, ld b,b and ld b, c and so on
+            let src_register = self.current_opcode & 0x7;
+            let dest_register = (self.current_opcode >> 3) & 0x7;
+            self.set_register(dest_register, src_register);
+        }
+    }
+
+    // parse math operations from 0x80 to 0x9F
+    // we can use the same principle as the LD opcodes
+    // math_operation == 0 => ADD
+    // math_operation == 1 => ADC
+    // math_operation == 2 => SUB
+    // math_operation == 3 => SBC
+    fn parse_math_opcodes(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        let register = self.current_opcode & 0x7;
+        let math_operation = (self.current_opcode >> 3) & 0x7;
+
+        if math_operation == 0 {
+            self.reg.a = self.reg.a.wrapping_add(self.get_src_register(register));
+            self.unset_flag(Flags::Operation);
+            if self.reg.a == 0 {
+                self.set_flag(Flags::Zero);
+            } else if self.reg.a & 0x7 == 0 {
+                self.set_flag(Flags::HalfCarry);
+            } else if self.reg.a & 0x40 == 0 {
+                self.set_flag(Flags::Carry);
+            }
+        } else if math_operation == 1 {
+            self.reg.a = self
+                .reg
+                .a
+                .wrapping_add(self.get_src_register(register) + self.get_flag(Flags::Carry));
+            self.unset_flag(Flags::Operation);
+            if self.reg.a == 0 {
+                self.set_flag(Flags::Zero);
+            } else if self.reg.a & 0x7 == 0 {
+                self.set_flag(Flags::HalfCarry);
+            } else if self.reg.a & 0x40 == 0 {
+                self.set_flag(Flags::Carry);
+            }
+        } else if math_operation == 2 {
+            self.reg.a -= self.reg.a.wrapping_sub(self.get_src_register(register));
+            self.set_flag(Flags::Operation);
+            if self.reg.a == 0 {
+                self.set_flag(Flags::Zero);
+            } else if self.reg.a > 0x8 {
+                self.set_flag(Flags::HalfCarry);
+            } else if self.get_src_register(register) > self.reg.a {
+                self.set_flag(Flags::Carry);
+            }
+        } else if math_operation == 3 {
+            self.reg.a = self.reg.a.wrapping_sub(
+                self.get_src_register(register)
+                    .wrapping_add(self.get_flag(Flags::Carry)),
+            );
+            self.set_flag(Flags::Operation);
+            if self.reg.a == 0 {
+                self.set_flag(Flags::Zero);
+            } else if self.reg.a > 0x8 {
+                self.set_flag(Flags::HalfCarry);
+            } else if self
+                .get_src_register(register)
+                .wrapping_add(self.get_flag(Flags::Carry))
+                > self.reg.a
+            {
+                self.set_flag(Flags::Carry);
+            }
+        }
+    }
+
+    // parse AND opcodes 0xA0 to 0xA7
+    fn parse_and_opcodes(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        let register = self.current_opcode & 0x7;
+        self.reg.a &= self.get_src_register(register);
+        self.set_flag(Flags::HalfCarry);
+        self.unset_flag(Flags::Operation);
+        self.unset_flag(Flags::Carry);
+        if self.reg.a == 0 {
+            self.set_flag(Flags::Zero);
+        }
+    }
+
+    // parse XOR opcodes from 0xA8 to 0xAF
+    fn parse_xor_opcodes(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        let register = self.current_opcode & 0x7;
+        self.reg.a ^= self.get_src_register(register);
+        self.reset_flags();
+        if self.reg.a == 0 {
+            self.set_flag(Flags::Zero);
+        }
+    }
+
+    // parse OR opcodes from 0xB0 to 0xB7
+    fn parse_or_opcodes(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        let register = self.current_opcode & 0x7;
+        self.reg.a |= self.get_src_register(register);
+        self.reset_flags();
+        if self.reg.a == 0 {
+            self.set_flag(Flags::Zero);
+        }
+    }
+
+    // parse CP opcodes from 0xB8 to 0xBF
+    fn parse_cp_opcodes(&mut self) {
+        self.reg.pc += 1;
+        self.m = 1;
+        self.t = 4;
+
+        let register = self.current_opcode & 0x7;
+        let result = self.reg.a.wrapping_sub(self.get_src_register(register));
+        self.set_flag(Flags::Operation);
+        if result == 0 {
+            self.set_flag(Flags::Zero);
+        } else if result > 0x8 {
+            self.set_flag(Flags::HalfCarry);
+        } else if self.get_src_register(register) > self.reg.a {
+            self.set_flag(Flags::Carry);
+        }
+    }
+
     pub fn decode_execute(&mut self) {
         self.current_opcode = self.mmu.read_byte(self.reg.pc.into());
+        self.reg.pc += 1;
         match self.current_opcode {
             0x00 => self.nop(),
             0x01 => self.load_bc(),
@@ -803,7 +1036,7 @@ impl Cpu {
             0x05 => self.dec_b(),
             0x06 => self.load_b(),
             0x07 => self.rlca(),
-            0x08 => self.load_sp_at_addr(self.current_opcode as u16),
+            0x08 => self.load_sp_at_addr(),
             0x09 => self.add_hl_bc(),
             0x0A => self.ld_a_bc(),
             0x0B => self.dec_bc(),
@@ -856,9 +1089,17 @@ impl Cpu {
             0x3A => self.ld_a_hl_dec(),
             0x3B => self.dec_sp(),
             0x3C => self.inc_a(),
+            0x3D => self.dec_a(),
+            0x3E => self.ld_a_byte(),
+            0x3F => self.ccf(),
+            0x40..=0x7F => self.parse_load_opcodes(),
+            0x80..=0x9F => self.parse_math_opcodes(),
+            0xA0..=0xA7 => self.parse_and_opcodes(),
+            0xA8..=0xAF => self.parse_xor_opcodes(),
+            0xB0..=0xB7 => self.parse_or_opcodes(),
+            0xB8..=0xBF => self.parse_cp_opcodes(),
             _ => println!("{:#X} is not a recognized opcode...", self.current_opcode),
         }
-        self.dec_b();
     }
 }
 
@@ -1064,7 +1305,7 @@ mod tests {
 
         // Act
         cpu.reg.sp = 32678;
-        cpu.load_sp_at_addr(expected_pc);
+        cpu.load_sp_at_addr();
 
         // Assert
         assert_eq!(expected_m_cycles, cpu.m);
