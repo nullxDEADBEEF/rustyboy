@@ -29,7 +29,16 @@ impl Mmu {
         self.working_ram[addr]
     }
 
+    pub fn write_byte(&mut self, addr: usize, value: u8) {
+        self.working_ram[addr] = value;
+    }
+
     pub fn read_word(&self, addr: usize) -> u16 {
         (self.working_ram[addr] as u16) << 8 | self.working_ram[addr + 1] as u16
+    }
+
+    pub fn write_word(&mut self, addr: usize, value: u16) {
+        self.working_ram[addr] = (value & 0xFF) as u8;
+        self.working_ram[addr + 1] = (value >> 8) as u8;
     }
 }

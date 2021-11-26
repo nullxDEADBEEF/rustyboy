@@ -37,15 +37,15 @@ pub struct Register {
 impl Register {
     pub fn new() -> Self {
         Self {
-            a: 0,
-            f: 0,
-            b: 0,
-            c: 0,
-            d: 0,
-            e: 0,
-            h: 0,
-            l: 0,
-            sp: 0,
+            a: 0x01,
+            f: u8::from(Flags::Zero),
+            b: 0x00,
+            c: 0x13,
+            d: 0x00,
+            e: 0xD8,
+            h: 0x01,
+            l: 0x4D,
+            sp: 0xFFFE,
             // when the gameboy powers up, pc is set to 0x0100
             // and instruction found at that location in the ROM is run.
             pc: 0x0100,
@@ -77,5 +77,14 @@ impl Register {
     pub fn set_de(&mut self, value: u16) {
         self.d = ((value & 0xFF00) >> 8) as u8;
         self.e = (value & 0xFF) as u8;
+    }
+
+    pub fn get_af(&self) -> u16 {
+        (self.a as u16) << 8 | self.f as u16
+    }
+
+    pub fn set_af(&mut self, value: u16) {
+        self.a = ((value & 0xFF00) >> 8) as u8;
+        self.f = (value & 0xFF) as u8;
     }
 }
