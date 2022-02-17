@@ -1,4 +1,6 @@
-use crate::{mmu::Mmu, register::Flags, register::Register};
+use std::path::Path;
+
+use crate::{bus::Bus, register::Flags, register::Register};
 
 // memory interface can address up to 65536 bytes (16-bit bus)
 // programs are accessed through the same address bus as normal memory
@@ -7,57 +9,135 @@ use crate::{mmu::Mmu, register::Flags, register::Register};
 // timings assume a CPU frequency of 4.19 MHz, called "T-states"
 // because timings are divisble by 4 many specify timings and clock frequency divided by 4, called "M-cycles"
 
-#[allow(dead_code)]
+enum MathOperations {
+    Add,
+    Adc,
+    Sub,
+    Sbc,
+}
+
+// TODO: add timing for more accurate emulation
+
 pub struct Cpu {
     reg: Register,
-    pub mmu: Mmu,
-    current_opcode: u8,
-    // accumulated clock
-    clock_m: u8,
-    clock_t: u8,
+    pub bus: Bus,
     // clock for last instruction
     m: u8,
     halted: bool,
-    ei: bool,
-    di: bool,
+    should_interrupt: bool,
 }
 
 impl Cpu {
-    pub fn new() -> Self {
+    pub fn new(rom_file: &Path) -> Self {
         Self {
             reg: Register::new(),
-            mmu: Mmu::new(),
-            current_opcode: 0,
-            clock_m: 0,
-            clock_t: 0,
+            bus: Bus::new(rom_file),
             m: 0,
             halted: false,
-            ei: false,
-            di: false,
+            should_interrupt: false,
         }
     }
 
     // --------------------------- UTIL -----------------------------------------------
-    fn reset_flags(&mut self) {
-        self.reg.f &= !u8::from(Flags::Zero);
-        self.reg.f &= !u8::from(Flags::HalfCarry);
-        self.reg.f &= !u8::from(Flags::Carry);
+    fn read_byte(&mut self) -> u8 {
+        let byte = self.bus.read_byte(self.reg.pc);
+        self.reg.pc += 1;
+        byte
     }
 
-    fn get_flag(&self, flag: Flags) -> u8 {
-        u8::from(flag)
+    fn read_word(&mut self) -> u16 {
+        let word = self.bus.read_word(self.reg.pc);
+        self.reg.pc += 2;
+        word
+    }
+
+    // ALU
+    // increment register by 1
+    fn inc_reg(&mut self, register: u8) -> u8 {
+        let result = register.wrapping_add(1);
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.unset_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::HalfCarry, (register & 0x0F) + 1 > 0x0F);
+
+        result
+    }
+
+    // decrement register by 1
+    fn dec_reg(&mut self, register: u8) -> u8 {
+        let result = register.wrapping_sub(1);
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.set_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::HalfCarry, (register & 0x0F) == 0);
+
+        result
+    }
+
+    fn add16(&mut self, register: u16) {
+        let result = self.reg.get_hl().wrapping_add(register);
+        self.unset_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::Carry, self.reg.get_hl() > 0xFFFF - register);
+        self.set_flag_on_if(
+            Flags::HalfCarry,
+            (self.reg.get_hl() & 0x07FF) + (register & 0x07FF) > 0x07FF,
+        );
+        self.reg.set_hl(result);
+    }
+
+    fn add16_imm(&mut self, register: u16) -> u16 {
+        let value = self.read_byte() as i8 as i16 as u16;
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::Zero);
+        self.set_flag_on_if(
+            Flags::HalfCarry,
+            (register & 0x000F) + (value & 0x000F) > 0x000F,
+        );
+        self.set_flag_on_if(
+            Flags::Carry,
+            (register & 0x00FF) + (value & 0x00FF) > 0x00FF,
+        );
+
+        register.wrapping_add(value)
+    }
+
+    // STACK OPERATIONS
+    fn push_stack(&mut self, value: u16) {
+        self.reg.sp -= 2;
+        self.bus.write_word(self.reg.sp, value);
+    }
+
+    fn pop_stack(&mut self) -> u16 {
+        let value = self.bus.read_word(self.reg.sp);
+        //self.reg.sp += 2;
+        self.reg.sp = self.reg.sp.wrapping_add(2);
+        value
+    }
+
+    fn print_register_data(&self) {
+        println!("A: {:2X} F: {:2X} B: {:2X} C: {:2X} D: {:2X} E: {:2X} H: {:2X} L: {:2X} SP: {:4X} PC: {:4X} ({:2X} {:2X} {:2X} {:2X})",
+        self.reg.a, self.reg.f, self.reg.b, self.reg.c, self.reg.d, self.reg.e, self.reg.h, self.reg.l, self.reg.sp, self.reg.pc,
+        self.bus.read_byte(self.reg.pc),
+        self.bus.read_byte(self.reg.pc + 1),
+        self.bus.read_byte(self.reg.pc + 2),
+        self.bus.read_byte(self.reg.pc + 3));
+    }
+    fn reset_flags(&mut self) {
+        self.reg.f &= Flags::Zero as u8;
+        self.reg.f &= Flags::HalfCarry as u8;
+        self.reg.f &= Flags::Carry as u8;
     }
 
     fn set_flag(&mut self, flag: Flags) {
-        self.reg.f |= u8::from(flag);
+        self.reg.f |= flag as u8;
+        self.reg.f &= 0xF0;
     }
 
     fn unset_flag(&mut self, flag: Flags) {
-        self.reg.f &= !u8::from(flag);
+        self.reg.f &= !(flag as u8);
+        self.reg.f &= 0xF0;
     }
 
     fn flag_is_active(&self, flag: Flags) -> bool {
-        self.reg.f & u8::from(flag.clone()) == u8::from(flag)
+        self.reg.f & (flag as u8) == flag as u8
     }
 
     fn set_flag_on_if(&mut self, flag: Flags, condition: bool) {
@@ -76,11 +156,10 @@ impl Cpu {
             3 => self.reg.e,
             4 => self.reg.h,
             5 => self.reg.l,
-            6 => self.mmu.working_ram[self.reg.get_hl() as usize],
+            6 => self.bus.read_byte(self.reg.get_hl()),
             7 => self.reg.a,
             _ => {
-                println!("Didnt find a source register, got: {}", src_register);
-                u8::MAX
+                panic!("SRC REGISTER NOT HERE AARRRRH");
             }
         }
     }
@@ -93,20 +172,154 @@ impl Cpu {
             3 => self.reg.e = self.get_src_register(src_register),
             4 => self.reg.h = self.get_src_register(src_register),
             5 => self.reg.l = self.get_src_register(src_register),
-            6 => {
-                self.mmu.working_ram[self.reg.get_hl() as usize] =
-                    self.get_src_register(src_register)
-            }
+            6 => self
+                .bus
+                .write_byte(self.reg.get_hl(), self.get_src_register(src_register)),
             7 => self.reg.a = self.get_src_register(src_register),
-            _ => println!("Didnt find a destination register, got: {}", dest_register),
+            _ => panic!("DEST REGISTER NOT HERE"), //println!("Didnt find a destination register, got: {}", dest_register),
         }
+    }
+
+    // rotate register left
+    fn cb_rlc(&mut self, register: u8) -> u8 {
+        self.m = 2;
+        let carry = if register & 0x80 == 0x80 { 1 } else { 0 };
+        let reg = register << 1 | carry;
+        self.set_flag_on_if(Flags::Zero, reg == 0);
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
+        self.set_flag_on_if(Flags::Carry, register & 0x80 == 0x80);
+
+        reg
+    }
+
+    // rotate register right
+    fn cb_rrc(&mut self, register: u8) -> u8 {
+        self.m = 2;
+        let carry = if register & 0x01 == 0x01 { 0x80 } else { 0 };
+        let reg = register >> 1 | carry;
+        self.set_flag_on_if(Flags::Zero, reg == 0);
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
+        self.set_flag_on_if(Flags::Carry, register & 0x01 == 0x01);
+
+        reg
+    }
+
+    // rotate bits in register left through carry
+    fn cb_rl(&mut self, register: u8) -> u8 {
+        self.m = 2;
+
+        let reg = register << 1
+            | if self.flag_is_active(Flags::Carry) {
+                1
+            } else {
+                0
+            };
+        self.set_flag_on_if(Flags::Zero, reg == 0);
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
+        self.set_flag_on_if(Flags::Carry, register & 0x80 == 0x80);
+
+        reg
+    }
+
+    // rotate bits in register right through carry
+    fn cb_rr(&mut self, register: u8) -> u8 {
+        self.m = 2;
+
+        let reg = register >> 1
+            | if self.flag_is_active(Flags::Carry) {
+                0x80
+            } else {
+                0
+            };
+        self.set_flag_on_if(Flags::Zero, reg == 0);
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
+        self.set_flag_on_if(Flags::Carry, register & 0x01 == 0x01);
+
+        reg
+    }
+
+    // shift left arithmetically (arithmetically is replicating the sign bit as needed to fill bit positions)
+    // since sometimes it is not desirable to move zeroes into the higher order bits
+    fn cb_sla(&mut self, register: u8) -> u8 {
+        self.m = 2;
+
+        let reg = register << 1;
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
+        self.set_flag_on_if(Flags::Zero, reg == 0);
+        self.set_flag_on_if(Flags::Carry, register & 0x80 == 0x80);
+
+        reg
+    }
+
+    // shift right arithmetically
+    fn cb_sra(&mut self, register: u8) -> u8 {
+        self.m = 2;
+
+        let reg = (register >> 1) | (register & 0x80);
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
+        self.set_flag_on_if(Flags::Zero, reg == 0);
+        self.set_flag_on_if(Flags::Carry, register & 0x01 == 0x01);
+
+        reg
+    }
+
+    // swap upper 4 bits with the lower 4 in the register
+    fn cb_swap(&mut self, register: u8) -> u8 {
+        let upper = register >> 4;
+        let lower = register << 4;
+        let reg = upper | lower;
+        self.reset_flags();
+        self.set_flag_on_if(Flags::Zero, register == 0);
+
+        reg
+    }
+
+    // shift right logically (right logically moves bits to the right, higher order bits gets zeros and lower order bits are discarded)
+    fn cb_srl(&mut self, register: u8) -> u8 {
+        self.m = 2;
+
+        let reg = register >> 1;
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
+        self.set_flag_on_if(Flags::Zero, reg == 0);
+        self.set_flag_on_if(Flags::Carry, register & 0x01 == 0x01);
+
+        reg
+    }
+
+    // test bit n in register, set zero flag if bit not set
+    fn cb_bit(&mut self, bit: u8, register: u8) {
+        self.m = 2;
+
+        if register & (1 << bit) == 0 {
+            self.set_flag(Flags::Zero);
+        }
+        self.unset_flag(Flags::Negative);
+        self.set_flag(Flags::HalfCarry);
+    }
+
+    // set bit n in register to 0
+    fn cb_res(&mut self, bit: u8, register: u8) -> u8 {
+        self.m = 2;
+        register & !(1 << bit)
+    }
+
+    // set bit n in register to 1
+    fn cb_set(&mut self, bit: u8, register: u8) -> u8 {
+        self.m = 2;
+        register | (1 << bit)
     }
 
     // --------------------------- OPCODES -----------------------------------------------
 
     // no operation, only advances the program counter by 1
     fn nop(&mut self) {
-        self.reg.pc += 1;
         self.m = 1;
     }
 
@@ -114,60 +327,43 @@ impl Cpu {
     fn load_bc(&mut self) {
         self.m = 3;
 
-        self.reg.set_bc(self.mmu.read_word(self.reg.pc.into()));
-        self.reg.pc += 3;
+        let value = self.read_word();
+        self.reg.set_bc(value);
     }
 
     // load data from register A to memory location specified by register pair BC
     fn load_bc_a(&mut self) {
         self.m = 2;
 
-        self.mmu.working_ram[self.reg.get_bc() as usize] = self.reg.a;
-        self.reg.pc += 1;
+        self.bus.write_byte(self.reg.get_bc(), self.reg.a);
     }
 
     // increment register pair BC
     fn inc_bc(&mut self) {
         self.m = 2;
 
-        self.reg.set_bc(self.reg.get_bc() + 1);
-        self.reg.pc += 1;
+        self.reg.set_bc(self.reg.get_bc().wrapping_add(1));
     }
 
     // increment register B
     fn inc_b(&mut self) {
         self.m = 1;
 
-        self.reg.b = self.reg.b.wrapping_add(1);
-        self.unset_flag(Flags::Operation);
-        // set half carry flag if we overflowed the lower 4-bits
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.b > 0xF);
-        self.set_flag_on_if(Flags::Zero, self.reg.b == 0);
-
-        self.reg.pc += 1;
+        self.reg.b = self.inc_reg(self.reg.b);
     }
 
     // decrement register B
     fn dec_b(&mut self) {
         self.m = 1;
 
-        self.reg.b = self.reg.b.wrapping_sub(1);
-        // set operation flag since we subtracted
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.b == 0);
-
-        // NOTE: borrow means if there was a carry/halfcarry from the preceeding operation
-        // so the last 4-bits overflowed
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.b & 0xF == 0);
-        self.reg.pc += 1;
+        self.reg.b = self.dec_reg(self.reg.b);
     }
 
     // load value into register B
     fn load_b(&mut self) {
         self.m = 2;
 
-        self.reg.b = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 2;
+        self.reg.b = self.read_byte();
     }
 
     // rotate register A left
@@ -175,83 +371,58 @@ impl Cpu {
         self.m = 1;
 
         self.reset_flags();
-        self.reg.a = (self.reg.a << 1)
-            | (if self.reg.a & self.get_flag(Flags::Zero) == 0x80 {
-                1
-            } else {
-                0
-            });
-        self.reg.pc += 1;
+        let carry = self.reg.a & 0x80 == 0x80;
+        self.reg.a = (self.reg.a << 1) | (if carry { 1 } else { 0 });
+        self.set_flag_on_if(Flags::Carry, carry);
     }
 
     // load stack pointer at given address
     fn load_sp_at_addr(&mut self) {
         self.m = 5;
 
-        // store lower byte of sp at addr
-        self.mmu.working_ram[self.reg.pc as usize] = self.reg.sp as u8;
-
-        // store upper byte of sp at addr + 1
-        self.mmu.working_ram[self.reg.pc as usize + 1] = (self.reg.sp >> 8 & 0xFF) as u8;
-        self.reg.pc += 3;
+        let address = self.read_word();
+        self.bus.write_word(address, self.reg.sp);
     }
 
     // add register BC to HL
     fn add_hl_bc(&mut self) {
         self.m = 2;
-
-        self.reg
-            .set_hl(self.reg.get_hl().wrapping_add(self.reg.get_bc()));
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Carry, self.reg.get_hl() > 0x7FA6);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.get_hl() > 0x800);
-        self.reg.pc += 1;
+        self.add16(self.reg.get_bc());
     }
 
     // load contents specified by register BC into register A
     fn ld_a_bc(&mut self) {
         self.m = 2;
 
-        self.reg.a = self.mmu.working_ram[self.reg.get_bc() as usize];
-        self.reg.pc += 1;
+        self.reg.a = self.bus.read_byte(self.reg.get_bc());
     }
 
     // decrement register pair BC by 1
     fn dec_bc(&mut self) {
         self.m = 2;
 
-        self.reg.set_bc(self.reg.get_bc() - 1);
-        self.reg.pc += 1;
+        self.reg.set_bc(self.reg.get_bc().wrapping_sub(1));
     }
 
     // increment contents of register C by 1
     fn inc_c(&mut self) {
         self.m = 1;
 
-        self.reg.c = self.reg.c.wrapping_add(1);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.c == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.c > 0xF);
-        self.reg.pc += 1;
+        self.reg.c = self.inc_reg(self.reg.c);
     }
 
     // decrement contents of register C by 1
     fn dec_c(&mut self) {
         self.m = 1;
 
-        self.reg.c = self.reg.c.wrapping_sub(1);
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.c == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.c & 0xF == 0);
-        self.reg.pc += 1;
+        self.reg.c = self.dec_reg(self.reg.c);
     }
 
     // load immediate operand into register C
     fn ld_c(&mut self) {
         self.m = 2;
 
-        self.reg.c = self.mmu.working_ram[self.reg.pc as usize];
-        self.reg.pc += 2;
+        self.reg.c = self.read_byte();
     }
 
     // Rotate contents of register A to the right
@@ -259,30 +430,29 @@ impl Cpu {
         self.m = 1;
 
         self.reset_flags();
+        let carry = self.reg.a & 0x01 == 0x01;
         self.reg.a = (self.reg.a >> 1) | (if self.reg.a & 0x01 == 0x01 { 0x80 } else { 0 });
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::Carry, carry);
     }
 
     // stop system clock and oscillator circuit
-    // TODO: implement
     fn stop(&mut self) {
-        self.m = 1;
+        self.nop()
     }
 
     // load 2 bytes of immediate data into register pair DE
     fn ld_de(&mut self) {
         self.m = 3;
 
-        self.reg.set_de(self.mmu.read_word(self.reg.pc.into()));
-        self.reg.pc += 3;
+        let value = self.read_word();
+        self.reg.set_de(value);
     }
 
     // store contents of register A in memory location specified by register pair DE
     fn ld_a(&mut self) {
         self.m = 2;
 
-        self.mmu.working_ram[self.reg.get_de() as usize] = self.reg.a;
-        self.reg.pc += 1;
+        self.bus.write_byte(self.reg.get_de(), self.reg.a);
     }
 
     // increment contents of register pair DE by 1
@@ -290,37 +460,27 @@ impl Cpu {
         self.m = 2;
 
         self.reg.set_de(self.reg.get_de().wrapping_add(1));
-        self.reg.pc += 1;
     }
 
     // increment contents of register D by 1
     fn inc_d(&mut self) {
         self.m = 1;
 
-        self.reg.d = self.reg.d.wrapping_add(1);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.d == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.d > 0xF);
-        self.reg.pc += 1;
+        self.reg.d = self.inc_reg(self.reg.d);
     }
 
     // decrement contents of register D by 1
     fn dec_d(&mut self) {
         self.m = 1;
 
-        self.reg.d = self.reg.d.wrapping_sub(1);
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.d == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.d & 0xF == 0);
-        self.reg.pc += 1;
+        self.reg.d = self.dec_reg(self.reg.d);
     }
 
     // load 8-bit immediate operand into register D
     fn ld_d(&mut self) {
         self.m = 2;
 
-        self.reg.d = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 2;
+        self.reg.d = self.read_byte();
     }
 
     // rotate contents of register A to the left, through the carry flag
@@ -328,35 +488,30 @@ impl Cpu {
         self.m = 1;
 
         self.reset_flags();
-        self.reg.a = (self.reg.a << 1) | (if self.reg.a & 0x80 == 0x80 { 1 } else { 0 });
-        self.reg.pc += 1;
+        let carry = self.reg.a & 0x80 == 0x80;
+        self.reg.a = (self.reg.a << 1) | (if carry { 1 } else { 0 });
+        self.set_flag_on_if(Flags::Carry, carry);
     }
 
     // jump s8 steps from current address in the pc
     fn jr(&mut self) {
         self.m = 3;
-
-        self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+        let value = self.bus.read_byte(self.reg.pc) as i8;
+        self.reg.pc = ((self.reg.pc as u32 as i32) + (value as i32)) as u16;
     }
 
     // add contents of register pair DE to the contents of register pair HL
     fn add_hl_de(&mut self) {
         self.m = 2;
 
-        self.reg
-            .set_hl(self.reg.get_hl().wrapping_add(self.reg.get_de()));
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.get_hl() & 0x07FF == 0);
-        self.set_flag_on_if(Flags::Carry, self.reg.get_hl() & 0x7FFF == 0);
-        self.reg.pc += 1;
+        self.add16(self.reg.get_de());
     }
 
     // load 8-bit contents of memory specified by register pair DE into register A
     fn ld_a_de(&mut self) {
         self.m = 2;
 
-        self.reg.a = self.mmu.working_ram[self.reg.get_de() as usize];
-        self.reg.pc += 1;
+        self.reg.a = self.bus.read_byte(self.reg.get_de());
     }
 
     // decrement contents of register pair DE by 1
@@ -364,55 +519,47 @@ impl Cpu {
         self.m = 2;
 
         self.reg.set_de(self.reg.get_de().wrapping_sub(1));
-        self.reg.pc += 1;
     }
 
     // increment contents of register E by 1
     fn inc_e(&mut self) {
         self.m = 1;
 
-        self.reg.e = self.reg.e.wrapping_add(1);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.e == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.e & 0xF == 0);
-        self.reg.pc += 1;
+        self.reg.e = self.inc_reg(self.reg.e);
     }
 
     // decrement contents of register E by 1
     fn dec_e(&mut self) {
         self.m = 1;
 
-        self.reg.e = self.reg.e.wrapping_sub(1);
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.e == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.e & 0xF == 0);
-        self.reg.pc += 1;
+        self.reg.e = self.dec_reg(self.reg.e);
     }
 
     // load 8-bit immediate operand into register E
     fn ld_e(&mut self) {
         self.m = 2;
 
-        self.reg.e = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 2;
+        self.reg.e = self.read_byte();
     }
 
     // rotate contents of register A ro the right through carry flag
     fn rra(&mut self) {
         self.m = 1;
 
-        self.reg.a = (self.reg.a >> 1) | (if self.reg.a & 0x01 == 0x01 { 0x80 } else { 0 });
-        self.reg.pc += 1;
+        let carry = self.reg.a & 0x01 == 0x01;
+        self.reg.a = (self.reg.a >> 1) | (if carry { 0x80 } else { 0 });
+        self.set_flag_on_if(Flags::Carry, carry);
     }
 
     // if z flag is 0, jump s8 steps from current address in pc
     // if not, instruction following is executed
     fn jr_nz(&mut self) {
-        self.m = 2;
-
         if !self.flag_is_active(Flags::Zero) {
-            self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+            self.m = 3;
+            let value = self.read_byte() as i8;
+            self.reg.pc = ((self.reg.pc as u32 as i32) + (value as i32)) as u16;
         } else {
+            self.m = 2;
             self.reg.pc += 1;
         }
     }
@@ -421,8 +568,8 @@ impl Cpu {
     fn ld_hl(&mut self) {
         self.m = 3;
 
-        self.reg.set_hl(self.mmu.read_word(self.reg.pc.into()));
-        self.reg.pc += 3;
+        let value = self.read_word();
+        self.reg.set_hl(value);
     }
 
     // store contents of register A into memory location specified by register pair HL
@@ -430,9 +577,8 @@ impl Cpu {
     fn ld_hl_inc_a(&mut self) {
         self.m = 2;
 
-        self.mmu.working_ram[self.reg.get_hl() as usize] = self.reg.a;
+        self.bus.write_byte(self.reg.get_hl(), self.reg.a);
         self.reg.set_hl(self.reg.get_hl().wrapping_add(1));
-        self.reg.pc += 1;
     }
 
     // increment contents of register pair HL by 1
@@ -440,37 +586,27 @@ impl Cpu {
         self.m = 2;
 
         self.reg.set_hl(self.reg.get_hl().wrapping_add(1));
-        self.reg.pc += 1;
     }
 
     // increment contents of register H by 1
     fn inc_h(&mut self) {
         self.m = 1;
 
-        self.reg.h = self.reg.h.wrapping_add(1);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.h == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.h & 0xF == 0);
-        self.reg.pc += 1;
+        self.reg.h = self.inc_reg(self.reg.h);
     }
 
     // decrement contents of register H by 1
     fn dec_h(&mut self) {
         self.m = 1;
 
-        self.reg.h = self.reg.h.wrapping_sub(1);
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.h == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.h & 0xF == 0);
-        self.reg.pc += 1;
+        self.reg.h = self.dec_reg(self.reg.h);
     }
 
     // load 8-bit immediate operand into register H
     fn ld_h(&mut self) {
         self.m = 2;
 
-        self.reg.h = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 2;
+        self.reg.h = self.read_byte();
     }
 
     // Decimal Adjust Accumulator, get binary-coded decimal representation after an arithmetic instruction
@@ -479,40 +615,40 @@ impl Cpu {
     fn daa(&mut self) {
         self.m = 1;
 
-        // after addition
-        if !self.get_flag(Flags::Operation) == 0 {
-            if self.flag_is_active(Flags::HalfCarry) || self.reg.a & 0xF > 0x9 {
-                self.reg.a = self.reg.a.wrapping_add(0x6);
-            }
-            if self.flag_is_active(Flags::Carry) || self.reg.a > 0x99 {
-                self.reg.a = self.reg.a.wrapping_add(0x60);
-                self.set_flag(Flags::Carry);
-            }
+        let mut adjust = if self.flag_is_active(Flags::Carry) {
+            0x60
         } else {
-            // after subtraction
-            if self.flag_is_active(Flags::Carry) {
-                self.reg.a = self.reg.a.wrapping_sub(0x60);
-            }
-            if self.flag_is_active(Flags::HalfCarry) {
-                self.reg.a = self.reg.a.wrapping_sub(0x6);
-            }
+            0x00
+        };
+        if self.flag_is_active(Flags::HalfCarry) {
+            adjust |= 0x06
+        };
+        if !self.flag_is_active(Flags::Negative) {
+            if self.reg.a & 0x0F > 0x09 {
+                adjust |= 0x06
+            };
+            if self.reg.a > 0x99 {
+                adjust |= 0x60
+            };
+            self.reg.a = self.reg.a.wrapping_add(adjust);
+        } else {
+            self.reg.a = self.reg.a.wrapping_add(adjust);
         }
 
-        if self.reg.a == 0 {
-            self.set_flag(Flags::Zero);
-        }
+        self.set_flag_on_if(Flags::Carry, adjust >= 0x60);
+        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
         self.unset_flag(Flags::HalfCarry);
-        self.reg.pc += 1;
     }
 
     // if z flag is active, jump s8 steps from current address else instruction following
     // is executed
     fn jr_z(&mut self) {
-        self.m = 2;
-
         if self.flag_is_active(Flags::Zero) {
-            self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+            self.m = 3;
+            let value = self.read_byte() as i8;
+            self.reg.pc = ((self.reg.pc as u32 as i32) + (value as i32)) as u16;
         } else {
+            self.m = 2;
             self.reg.pc += 1;
         }
     }
@@ -521,12 +657,7 @@ impl Cpu {
     fn add_hl_hl(&mut self) {
         self.m = 2;
 
-        self.reg
-            .set_hl(self.reg.get_hl().wrapping_add(self.reg.get_hl()));
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.get_hl() & 0x07FF == 0);
-        self.set_flag_on_if(Flags::Carry, self.reg.get_hl() & 0x7FF == 0);
-        self.reg.pc += 1;
+        self.add16(self.reg.get_hl());
     }
 
     // load contents of memory specified by register pair HL into register A and increase
@@ -534,9 +665,9 @@ impl Cpu {
     fn ld_a_hl_plus(&mut self) {
         self.m = 2;
 
-        self.reg.a = self.mmu.working_ram[self.reg.get_hl() as usize];
+        //self.reg.set_hl(self.reg.get_hl().wrapping_add(1));
+        self.reg.a = self.bus.read_byte(self.reg.get_hl());
         self.reg.set_hl(self.reg.get_hl().wrapping_add(1));
-        self.reg.pc += 1;
     }
 
     // decrement contents of register pair HL by 1
@@ -544,37 +675,27 @@ impl Cpu {
         self.m = 2;
 
         self.reg.set_hl(self.reg.get_hl().wrapping_sub(1));
-        self.reg.pc += 1;
     }
 
     // increment contents of register L by 1
     fn inc_l(&mut self) {
         self.m = 1;
 
-        self.reg.l = self.reg.l.wrapping_add(1);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.l == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.l & 0x8 == 0);
-        self.reg.pc += 1;
+        self.reg.l = self.inc_reg(self.reg.l);
     }
 
     // decrement contents of register L by 1
     fn dec_l(&mut self) {
         self.m = 1;
 
-        self.reg.l = self.reg.l.wrapping_sub(1);
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.l == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.l > 0xF);
-        self.reg.pc += 1;
+        self.reg.l = self.dec_reg(self.reg.l);
     }
 
     // load 8-bit immediate operand into register L
     fn ld_l(&mut self) {
         self.m = 2;
 
-        self.reg.l = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 2;
+        self.reg.l = self.read_byte();
     }
 
     // flip all contents of register A
@@ -582,19 +703,19 @@ impl Cpu {
         self.m = 1;
 
         self.reg.a = !self.reg.a;
-        self.set_flag(Flags::Operation);
+        self.set_flag(Flags::Negative);
         self.set_flag(Flags::HalfCarry);
-        self.reg.pc += 1;
     }
 
     // if CY flag is not set, jump s8 steps from current address
     // else instruction following JP is executed
     fn jr_nc(&mut self) {
-        self.m = 2;
-
         if !self.flag_is_active(Flags::Carry) {
-            self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+            self.m = 3;
+            let value = self.read_byte() as i8;
+            self.reg.pc = ((self.reg.pc as u32 as i32) + (value as i32)) as u16;
         } else {
+            self.m = 2;
             self.reg.pc += 1;
         }
     }
@@ -603,8 +724,7 @@ impl Cpu {
     fn ld_sp(&mut self) {
         self.m = 3;
 
-        self.reg.sp = self.mmu.read_word(self.reg.pc.into());
-        self.reg.pc += 3;
+        self.reg.sp = self.read_word();
     }
 
     // store contents of register A in memory location specified by register pair HL
@@ -612,9 +732,8 @@ impl Cpu {
     fn ld_hlm_a(&mut self) {
         self.m = 2;
 
-        self.mmu.working_ram[self.reg.get_hl() as usize] = self.reg.a;
+        self.bus.write_byte(self.reg.get_hl(), self.reg.a);
         self.reg.set_hl(self.reg.get_hl().wrapping_sub(1));
-        self.reg.pc += 1;
     }
 
     // increment contents of register pair SP by 1
@@ -622,41 +741,34 @@ impl Cpu {
         self.m = 2;
 
         self.reg.sp = self.reg.sp.wrapping_add(1);
-        self.reg.pc += 1;
     }
 
     // increment contents of memory specified by register pair HL by 1
     fn inc_content_at_hl(&mut self) {
         self.m = 3;
 
-        self.mmu.working_ram[self.reg.get_hl() as usize] += 1;
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(
-            Flags::Zero,
-            self.mmu.working_ram[self.reg.get_hl() as usize] == 0,
-        );
+        let value = self.bus.read_byte(self.reg.get_hl()).wrapping_add(1);
+        self.unset_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::Zero, value == 0);
         self.set_flag_on_if(
             Flags::HalfCarry,
-            self.mmu.working_ram[self.reg.get_hl() as usize] & 0xF == 0,
+            (self.bus.read_byte(self.reg.get_hl()) & 0xF) + 1 > 0xF,
         );
-        self.reg.pc += 1;
+        self.bus.write_byte(self.reg.get_hl(), value);
     }
 
     // decrement contents of memory specifed by register pair HL by 1
     fn dec_content_at_hl(&mut self) {
         self.m = 3;
 
-        self.mmu.working_ram[self.reg.get_hl() as usize] -= 1;
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(
-            Flags::Zero,
-            self.mmu.working_ram[self.reg.get_hl() as usize] == 0,
-        );
+        let value = self.bus.read_byte(self.reg.get_hl()).wrapping_sub(1);
+        self.set_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::Zero, value == 0);
         self.set_flag_on_if(
             Flags::HalfCarry,
-            self.mmu.working_ram[self.reg.get_hl() as usize] & 0xF == 0,
+            self.bus.read_byte(self.reg.get_hl()) & 0xF == 0,
         );
-        self.reg.pc += 1;
+        self.bus.write_byte(self.reg.get_hl(), value);
     }
 
     // store contents of 8-bit immediate operation into memory location
@@ -664,8 +776,8 @@ impl Cpu {
     fn ld_hl_byte(&mut self) {
         self.m = 3;
 
-        self.mmu.working_ram[self.reg.get_hl() as usize] = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 2;
+        let value = self.read_byte();
+        self.bus.write_byte(self.reg.get_hl(), value);
     }
 
     // set the carry flag
@@ -673,17 +785,19 @@ impl Cpu {
         self.m = 1;
 
         self.set_flag(Flags::Carry);
-        self.reg.pc += 1;
+        self.unset_flag(Flags::Negative);
+        self.unset_flag(Flags::HalfCarry);
     }
 
     // if carry flag is active, jump s8 steps from current address
     // else instruction following jp is executed
     fn jr_c(&mut self) {
-        self.m = 2;
-
         if self.flag_is_active(Flags::Carry) {
-            self.reg.pc += self.mmu.working_ram[self.reg.pc as usize] as u16;
+            self.m = 3;
+            let value = self.read_byte() as i8;
+            self.reg.pc = ((self.reg.pc as u32 as i32) + value as i32) as u16;
         } else {
+            self.m = 2;
             self.reg.pc += 1;
         }
     }
@@ -692,11 +806,7 @@ impl Cpu {
     fn add_hl_sp(&mut self) {
         self.m = 2;
 
-        self.reg.set_hl(self.reg.get_hl().wrapping_add(self.reg.sp));
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.get_hl() & 0x07FF == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.get_hl() & 0x7FF == 0);
-        self.reg.pc += 1;
+        self.add16(self.reg.sp);
     }
 
     // load contents specified by register pair HL into register A
@@ -704,9 +814,9 @@ impl Cpu {
     fn ld_a_hl_dec(&mut self) {
         self.m = 2;
 
-        self.reg.a = self.mmu.working_ram[self.reg.get_hl() as usize];
+        //self.reg.set_hl(self.reg.get_hl().wrapping_sub(1));
+        self.reg.a = self.bus.read_byte(self.reg.get_hl());
         self.reg.set_hl(self.reg.get_hl().wrapping_sub(1));
-        self.reg.pc += 1;
     }
 
     // decrement contents of register pair SP by 1
@@ -714,56 +824,45 @@ impl Cpu {
         self.m = 2;
 
         self.reg.sp = self.reg.sp.wrapping_sub(1);
-        self.reg.pc += 1;
     }
 
     // increment contents of register A by 1
     fn inc_a(&mut self) {
         self.m = 1;
 
-        self.reg.a = self.reg.a.wrapping_add(1);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.a & 0x8 == 0);
-        self.reg.pc += 1;
+        self.reg.a = self.inc_reg(self.reg.a);
     }
 
     // decrement contents of register A by 1
     fn dec_a(&mut self) {
         self.m = 1;
 
-        self.reg.a = self.reg.a.wrapping_sub(1);
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.a & 0x8 == 0);
-        self.reg.pc += 1;
+        self.reg.a = self.dec_reg(self.reg.a);
     }
 
     // load 8-bit immediate operand into register A
     fn ld_a_byte(&mut self) {
         self.m = 2;
 
-        self.reg.a = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 2;
+        self.reg.a = self.read_byte();
     }
 
     // flip carry flag
     fn ccf(&mut self) {
         self.m = 1;
 
-        self.unset_flag(Flags::Operation);
+        self.unset_flag(Flags::Negative);
         self.unset_flag(Flags::HalfCarry);
-        self.reg.f ^= u8::from(Flags::Carry);
-        self.reg.pc += 1;
+        self.reg.f ^= 1 << 4;
     }
 
     // parses the opcodes from 0x40 to 0x7F
     // also handles the case of 0x76 which is the HALT opcode
-    fn parse_load_opcodes(&mut self) {
+    fn parse_load_opcodes(&mut self, opcode: u8) {
         self.m = 1;
 
         // HALT opcode
-        if self.current_opcode == 0x76 {
+        if opcode == 0x76 {
             self.halted = true;
         } else {
             // LD opcodes
@@ -773,11 +872,10 @@ impl Cpu {
             // index we want to load from, and by shifting 3 bits to the right
             // we get the register we want to load into.
             // So we get, ld b,b and ld b, c and so on
-            let src_register = self.current_opcode & 0x7;
-            let dest_register = (self.current_opcode >> 3) & 0x7;
+            let src_register = opcode & 0x7;
+            let dest_register = (opcode >> 3) & 0x7;
             self.set_register(dest_register, src_register);
         }
-        self.reg.pc += 1;
     }
 
     // parse math operations from 0x80 to 0x9F
@@ -787,149 +885,158 @@ impl Cpu {
     // math_operation == 2 => SUB
     // math_operation == 3 => SBC
     //
-    // TODO: Figure out if we need to handle special case with (HL)
-    // if so then we need to increment the pc
-    fn parse_math_opcodes(&mut self) {
+    fn parse_math_opcodes(&mut self, opcode: u8) {
         self.m = 1;
 
-        let register = self.current_opcode & 0x7;
-        let math_operation = (self.current_opcode >> 3) & 0x7;
+        let register = opcode & 0x7;
+        let math_operation = (opcode >> 3) & 0x7;
 
-        if math_operation == 0 {
-            self.reg.a = self.reg.a.wrapping_add(self.get_src_register(register));
-            self.unset_flag(Flags::Operation);
-            self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-            self.set_flag_on_if(Flags::HalfCarry, self.reg.a & 0x7 == 0);
-            self.set_flag_on_if(Flags::Carry, self.reg.a & 0x40 == 0);
-        } else if math_operation == 1 {
-            self.reg.a = self
+        let carry = if self.flag_is_active(Flags::Carry) {
+            1
+        } else {
+            0
+        };
+
+        if math_operation == MathOperations::Add as u8
+            || math_operation == MathOperations::Adc as u8
+        {
+            let result = self
                 .reg
                 .a
-                .wrapping_add(self.get_src_register(register) + self.get_flag(Flags::Carry));
-            self.unset_flag(Flags::Operation);
-            self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-            self.set_flag_on_if(Flags::HalfCarry, self.reg.a & 0x7 == 0);
-            self.set_flag_on_if(Flags::Carry, self.reg.a & 0x40 == 0);
-        } else if math_operation == 2 {
-            self.reg.a -= self.reg.a.wrapping_sub(self.get_src_register(register));
-            self.set_flag(Flags::Operation);
-            self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-            self.set_flag_on_if(Flags::HalfCarry, self.reg.a > 0x8);
-            self.set_flag_on_if(Flags::Carry, self.get_src_register(register) > self.reg.a);
-        } else if math_operation == 3 {
-            self.reg.a = self.reg.a.wrapping_sub(
-                self.get_src_register(register)
-                    .wrapping_add(self.get_flag(Flags::Carry)),
+                .wrapping_add(self.get_src_register(register))
+                .wrapping_add(carry);
+            self.unset_flag(Flags::Negative);
+            self.set_flag_on_if(Flags::Zero, result == 0);
+            self.set_flag_on_if(
+                Flags::HalfCarry,
+                (self.reg.a & 0xF) + (self.get_src_register(register) & 0xF) + carry > 0xF,
             );
-            self.set_flag(Flags::Operation);
-            self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-            self.set_flag_on_if(Flags::HalfCarry, self.reg.a > 0x8);
             self.set_flag_on_if(
                 Flags::Carry,
-                self.get_src_register(register)
-                    .wrapping_add(self.get_flag(Flags::Carry))
-                    > self.reg.a,
+                self.reg.a as u16 + self.get_src_register(register) as u16 + carry as u16 > 0xFF,
             );
+            self.reg.a = result;
+        } else if math_operation == MathOperations::Sub as u8
+            || math_operation == MathOperations::Sbc as u8
+        {
+            let result = self
+                .reg
+                .a
+                .wrapping_sub(self.get_src_register(register))
+                .wrapping_sub(carry);
+            self.set_flag(Flags::Negative);
+            self.set_flag_on_if(Flags::Zero, result == 0);
+            self.set_flag_on_if(
+                Flags::HalfCarry,
+                (self.reg.a & 0x0F) < (self.get_src_register(register) & 0x0F) + carry,
+            );
+            self.set_flag_on_if(
+                Flags::Carry,
+                self.get_src_register(register) + carry > self.reg.a,
+            );
+            self.reg.a = result;
         }
-        self.reg.pc += 1;
     }
 
     // parse AND opcodes 0xA0 to 0xA7
-    fn parse_and_opcodes(&mut self) {
+    fn parse_and_opcodes(&mut self, opcode: u8) {
         self.m = 1;
 
-        let register = self.current_opcode & 0x7;
-        self.reg.a &= self.get_src_register(register);
+        let register = opcode & 0x7;
+        let result = self.reg.a & self.get_src_register(register);
         self.set_flag(Flags::HalfCarry);
-        self.unset_flag(Flags::Operation);
+        self.unset_flag(Flags::Negative);
         self.unset_flag(Flags::Carry);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.reg.a = result;
     }
 
     // parse XOR opcodes from 0xA8 to 0xAF
-    fn parse_xor_opcodes(&mut self) {
+    fn parse_xor_opcodes(&mut self, opcode: u8) {
         self.m = 1;
 
-        let register = self.current_opcode & 0x7;
-        self.reg.a ^= self.get_src_register(register);
+        let register = opcode & 0x7;
+        let result = self.reg.a ^ self.get_src_register(register);
         self.reset_flags();
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.reg.a = result;
     }
 
     // parse OR opcodes from 0xB0 to 0xB7
-    fn parse_or_opcodes(&mut self) {
+    fn parse_or_opcodes(&mut self, opcode: u8) {
         self.m = 1;
 
-        let register = self.current_opcode & 0x7;
-        self.reg.a |= self.get_src_register(register);
+        let register = opcode & 0x7;
+        let result = self.reg.a | self.get_src_register(register);
         self.reset_flags();
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.reg.a = result;
     }
 
     // parse CP opcodes from 0xB8 to 0xBF
-    fn parse_cp_opcodes(&mut self) {
+    fn parse_cp_opcodes(&mut self, opcode: u8) {
         self.m = 1;
 
-        let register = self.current_opcode & 0x7;
+        let register = opcode & 0x7;
         let result = self.reg.a.wrapping_sub(self.get_src_register(register));
-        self.set_flag(Flags::Operation);
+        let carry = if self.flag_is_active(Flags::Carry) {
+            1
+        } else {
+            0
+        };
+        self.set_flag(Flags::Negative);
         self.set_flag_on_if(Flags::Zero, result == 0);
-        self.set_flag_on_if(Flags::HalfCarry, result > 0x8);
-        self.set_flag_on_if(Flags::Carry, self.get_src_register(register) > self.reg.a);
-        self.reg.pc += 1;
+        self.set_flag_on_if(
+            Flags::HalfCarry,
+            (self.reg.a & 0x0F) < (self.get_src_register(register) & 0x0F) + carry,
+        );
+        self.set_flag_on_if(
+            Flags::Carry,
+            self.get_src_register(register) + carry > self.reg.a,
+        );
     }
 
     // return from subroutine if nz
     fn ret_nz(&mut self) {
-        self.m = 5;
-
         if !self.flag_is_active(Flags::Zero) {
-            self.reg.pc = self.mmu.read_word(self.reg.sp.into());
-            self.reg.sp += 2;
+            self.m = 5;
+            self.reg.pc = self.pop_stack();
+        } else {
+            self.m = 2;
         }
-        self.reg.pc += 1;
     }
 
     // pop contents of memory stack into register pair BC
     fn pop_bc(&mut self) {
         self.m = 3;
 
-        let lower_byte = self.mmu.read_byte(self.reg.sp.into());
-        self.reg.c = lower_byte;
-        self.reg.sp += 1;
-        let upper_byte = self.mmu.read_byte(self.reg.sp.into());
-        self.reg.b = upper_byte;
-        self.reg.sp += 1;
-        self.reg.pc += 1;
+        let value = self.pop_stack();
+        self.reg.set_bc(value);
     }
 
     // jump to address if condition is met
     fn jp_nz(&mut self) {
-        self.m = 4;
-
         if !self.flag_is_active(Flags::Zero) {
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.m = 4;
+            self.reg.pc = self.read_word();
         } else {
-            self.reg.pc += 1;
+            self.m = 3;
+            self.reg.pc += 2;
         }
     }
 
     // jump to address
     fn jp(&mut self) {
         self.m = 4;
-        self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+        self.reg.pc = self.read_word();
     }
 
     // call address if condition is met
     fn call_nz(&mut self) {
         if !self.flag_is_active(Flags::Zero) {
             self.m = 6;
-            self.reg.sp -= 2;
-            self.mmu.write_word(self.reg.sp.into(), self.reg.pc + 2);
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.push_stack(self.reg.pc + 2);
+            self.reg.pc = self.read_word();
         } else {
             self.reg.pc += 2;
             self.m = 3;
@@ -940,32 +1047,38 @@ impl Cpu {
     fn push_bc(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.get_bc());
-        self.reg.pc += 1;
+        self.push_stack(self.reg.get_bc());
     }
 
     // add 8-bit immediate to register A
     fn add_a_byte(&mut self) {
         self.m = 2;
 
-        self.reg.a = self
-            .reg
-            .a
-            .wrapping_add(self.mmu.read_byte(self.reg.pc.into()));
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.a & 0x7 == 0);
-        self.set_flag_on_if(Flags::Carry, self.reg.a & 0x80 == 0);
-        self.reg.pc += 2;
+        let value = self.read_byte();
+        let result = self.reg.a.wrapping_add(value);
+        let carry = if self.flag_is_active(Flags::Carry) {
+            1
+        } else {
+            0
+        };
+        self.unset_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.set_flag_on_if(
+            Flags::HalfCarry,
+            (self.reg.a & 0xF) + (value & 0xF) + carry > 0xF,
+        );
+        self.set_flag_on_if(
+            Flags::Carry,
+            self.reg.a as u16 + value as u16 + carry as u16 > 0xFF,
+        );
+        self.reg.a = result;
     }
 
     // call address
     fn rst_zero(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x00
     }
 
@@ -973,8 +1086,7 @@ impl Cpu {
     fn ret_z(&mut self) {
         if self.flag_is_active(Flags::Zero) {
             self.m = 5;
-            self.reg.pc = self.mmu.read_word(self.reg.sp.into());
-            self.reg.sp += 2;
+            self.reg.pc = self.pop_stack();
         } else {
             self.m = 2;
         }
@@ -984,18 +1096,352 @@ impl Cpu {
     fn ret(&mut self) {
         self.m = 4;
 
-        self.reg.pc = self.mmu.read_word(self.reg.sp.into());
-        self.reg.sp += 2;
+        self.reg.pc = self.pop_stack();
     }
 
     // jump to address if condition is met
     fn jp_z(&mut self) {
         if self.flag_is_active(Flags::Zero) {
             self.m = 4;
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.reg.pc = self.read_word();
         } else {
             self.m = 3;
             self.reg.pc += 2;
+        }
+    }
+
+    // call opcode from from the CB-prefix table
+    fn call_cb(&mut self) {
+        let opcode = self.read_byte();
+        match opcode {
+            0x00 => self.reg.b = self.cb_rlc(self.reg.b),
+            0x01 => self.reg.c = self.cb_rlc(self.reg.c),
+            0x02 => self.reg.d = self.cb_rlc(self.reg.d),
+            0x03 => self.reg.e = self.cb_rlc(self.reg.e),
+            0x04 => self.reg.h = self.cb_rlc(self.reg.h),
+            0x05 => self.reg.l = self.cb_rlc(self.reg.l),
+            0x06 => {
+                let value = self.cb_rlc(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x07 => self.reg.a = self.cb_rlc(self.reg.a),
+            0x08 => self.reg.b = self.cb_rrc(self.reg.b),
+            0x09 => self.reg.c = self.cb_rrc(self.reg.c),
+            0x0A => self.reg.d = self.cb_rrc(self.reg.d),
+            0x0B => self.reg.e = self.cb_rrc(self.reg.e),
+            0x0C => self.reg.h = self.cb_rrc(self.reg.h),
+            0x0D => self.reg.l = self.cb_rrc(self.reg.l),
+            0x0E => {
+                let value = self.cb_rrc(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value)
+            }
+            0x0F => self.reg.a = self.cb_rrc(self.reg.a),
+            0x10 => self.reg.b = self.cb_rl(self.reg.b),
+            0x11 => self.reg.c = self.cb_rl(self.reg.c),
+            0x12 => self.reg.d = self.cb_rl(self.reg.d),
+            0x13 => self.reg.e = self.cb_rl(self.reg.e),
+            0x14 => self.reg.h = self.cb_rl(self.reg.h),
+            0x15 => self.reg.l = self.cb_rl(self.reg.l),
+            0x16 => {
+                let value = self.cb_rl(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x17 => self.reg.a = self.cb_rl(self.reg.a),
+            0x18 => self.reg.b = self.cb_rr(self.reg.b),
+            0x19 => self.reg.c = self.cb_rr(self.reg.c),
+            0x1A => self.reg.d = self.cb_rr(self.reg.d),
+            0x1B => self.reg.e = self.cb_rr(self.reg.e),
+            0x1C => self.reg.h = self.cb_rr(self.reg.h),
+            0x1D => self.reg.l = self.cb_rr(self.reg.l),
+            0x1E => {
+                let value = self.cb_rr(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x1F => self.reg.a = self.cb_rr(self.reg.a),
+            0x20 => self.reg.b = self.cb_sla(self.reg.b),
+            0x21 => self.reg.c = self.cb_sla(self.reg.c),
+            0x22 => self.reg.d = self.cb_sla(self.reg.d),
+            0x23 => self.reg.e = self.cb_sla(self.reg.e),
+            0x24 => self.reg.h = self.cb_sla(self.reg.h),
+            0x25 => self.reg.l = self.cb_sla(self.reg.l),
+            0x26 => {
+                let value = self.cb_sla(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x27 => self.reg.a = self.cb_sla(self.reg.a),
+            0x28 => self.reg.b = self.cb_sra(self.reg.b),
+            0x29 => self.reg.c = self.cb_sra(self.reg.c),
+            0x2A => self.reg.d = self.cb_sra(self.reg.d),
+            0x2B => self.reg.e = self.cb_sra(self.reg.e),
+            0x2C => self.reg.h = self.cb_sra(self.reg.h),
+            0x2D => self.reg.l = self.cb_sra(self.reg.l),
+            0x2E => {
+                let value = self.cb_sra(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x2F => self.reg.a = self.cb_sra(self.reg.a),
+            0x30 => self.reg.b = self.cb_swap(self.reg.b),
+            0x31 => self.reg.c = self.cb_swap(self.reg.c),
+            0x32 => self.reg.d = self.cb_swap(self.reg.d),
+            0x33 => self.reg.e = self.cb_swap(self.reg.e),
+            0x34 => self.reg.h = self.cb_swap(self.reg.h),
+            0x35 => self.reg.l = self.cb_swap(self.reg.l),
+            0x36 => {
+                let value = self.cb_swap(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x37 => self.reg.a = self.cb_swap(self.reg.a),
+            0x38 => self.reg.b = self.cb_srl(self.reg.b),
+            0x39 => self.reg.c = self.cb_srl(self.reg.c),
+            0x3A => self.reg.d = self.cb_srl(self.reg.d),
+            0x3B => self.reg.e = self.cb_srl(self.reg.e),
+            0x3C => self.reg.h = self.cb_srl(self.reg.h),
+            0x3D => self.reg.l = self.cb_srl(self.reg.l),
+            0x3E => {
+                let value = self.cb_srl(self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x3F => self.reg.a = self.cb_srl(self.reg.a),
+            0x40 => self.cb_bit(0, self.reg.b),
+            0x41 => self.cb_bit(0, self.reg.c),
+            0x42 => self.cb_bit(0, self.reg.d),
+            0x43 => self.cb_bit(0, self.reg.e),
+            0x44 => self.cb_bit(0, self.reg.h),
+            0x45 => self.cb_bit(0, self.reg.l),
+            0x46 => self.cb_bit(0, self.bus.read_byte(self.reg.get_hl())),
+            0x47 => self.cb_bit(0, self.reg.a),
+            0x48 => self.cb_bit(1, self.reg.b),
+            0x49 => self.cb_bit(1, self.reg.c),
+            0x4A => self.cb_bit(1, self.reg.d),
+            0x4B => self.cb_bit(1, self.reg.e),
+            0x4C => self.cb_bit(1, self.reg.h),
+            0x4D => self.cb_bit(1, self.reg.l),
+            0x4E => self.cb_bit(1, self.bus.read_byte(self.reg.get_hl())),
+            0x4F => self.cb_bit(1, self.reg.a),
+            0x50 => self.cb_bit(2, self.reg.b),
+            0x51 => self.cb_bit(2, self.reg.c),
+            0x52 => self.cb_bit(2, self.reg.d),
+            0x53 => self.cb_bit(2, self.reg.e),
+            0x54 => self.cb_bit(2, self.reg.h),
+            0x55 => self.cb_bit(2, self.reg.l),
+            0x56 => self.cb_bit(2, self.bus.read_byte(self.reg.get_hl())),
+            0x57 => self.cb_bit(2, self.reg.a),
+            0x58 => self.cb_bit(3, self.reg.b),
+            0x59 => self.cb_bit(3, self.reg.c),
+            0x5A => self.cb_bit(3, self.reg.d),
+            0x5B => self.cb_bit(3, self.reg.e),
+            0x5C => self.cb_bit(3, self.reg.h),
+            0x5D => self.cb_bit(3, self.reg.l),
+            0x5E => self.cb_bit(3, self.bus.read_byte(self.reg.get_hl())),
+            0x5F => self.cb_bit(3, self.reg.a),
+            0x60 => self.cb_bit(4, self.reg.b),
+            0x61 => self.cb_bit(4, self.reg.c),
+            0x62 => self.cb_bit(4, self.reg.d),
+            0x63 => self.cb_bit(4, self.reg.e),
+            0x64 => self.cb_bit(4, self.reg.h),
+            0x65 => self.cb_bit(4, self.reg.l),
+            0x66 => self.cb_bit(4, self.bus.read_byte(self.reg.get_hl())),
+            0x67 => self.cb_bit(4, self.reg.a),
+            0x68 => self.cb_bit(5, self.reg.b),
+            0x69 => self.cb_bit(5, self.reg.c),
+            0x6A => self.cb_bit(5, self.reg.d),
+            0x6B => self.cb_bit(5, self.reg.e),
+            0x6C => self.cb_bit(5, self.reg.h),
+            0x6D => self.cb_bit(5, self.reg.l),
+            0x6E => self.cb_bit(5, self.bus.read_byte(self.reg.get_hl())),
+            0x6F => self.cb_bit(5, self.reg.a),
+            0x70 => self.cb_bit(6, self.reg.b),
+            0x71 => self.cb_bit(6, self.reg.c),
+            0x72 => self.cb_bit(6, self.reg.d),
+            0x73 => self.cb_bit(6, self.reg.e),
+            0x74 => self.cb_bit(6, self.reg.h),
+            0x75 => self.cb_bit(6, self.reg.l),
+            0x76 => self.cb_bit(6, self.bus.read_byte(self.reg.get_hl())),
+            0x77 => self.cb_bit(6, self.reg.a),
+            0x78 => self.cb_bit(7, self.reg.b),
+            0x79 => self.cb_bit(7, self.reg.c),
+            0x7A => self.cb_bit(7, self.reg.d),
+            0x7B => self.cb_bit(7, self.reg.e),
+            0x7C => self.cb_bit(7, self.reg.h),
+            0x7D => self.cb_bit(7, self.reg.l),
+            0x7E => self.cb_bit(7, self.bus.read_byte(self.reg.get_hl())),
+            0x7F => self.cb_bit(7, self.reg.a),
+            0x80 => self.reg.b = self.cb_res(0, self.reg.b),
+            0x81 => self.reg.c = self.cb_res(0, self.reg.c),
+            0x82 => self.reg.d = self.cb_res(0, self.reg.d),
+            0x83 => self.reg.e = self.cb_res(0, self.reg.e),
+            0x84 => self.reg.h = self.cb_res(0, self.reg.h),
+            0x85 => self.reg.l = self.cb_res(0, self.reg.l),
+            0x86 => {
+                let value = self.cb_res(0, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x87 => self.reg.a = self.cb_res(0, self.reg.a),
+            0x88 => self.reg.b = self.cb_res(1, self.reg.b),
+            0x89 => self.reg.c = self.cb_res(1, self.reg.c),
+            0x8A => self.reg.d = self.cb_res(1, self.reg.d),
+            0x8B => self.reg.e = self.cb_res(1, self.reg.e),
+            0x8C => self.reg.h = self.cb_res(1, self.reg.h),
+            0x8D => self.reg.l = self.cb_res(1, self.reg.l),
+            0x8E => {
+                let value = self.cb_res(1, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x8F => self.reg.a = self.cb_res(1, self.reg.a),
+            0x90 => self.reg.b = self.cb_res(2, self.reg.b),
+            0x91 => self.reg.c = self.cb_res(2, self.reg.c),
+            0x92 => self.reg.d = self.cb_res(2, self.reg.d),
+            0x93 => self.reg.e = self.cb_res(2, self.reg.e),
+            0x94 => self.reg.h = self.cb_res(2, self.reg.h),
+            0x95 => self.reg.l = self.cb_res(2, self.reg.l),
+            0x96 => {
+                let value = self.cb_res(2, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x97 => self.reg.a = self.cb_res(2, self.reg.a),
+            0x98 => self.reg.b = self.cb_res(3, self.reg.b),
+            0x99 => self.reg.c = self.cb_res(3, self.reg.c),
+            0x9A => self.reg.d = self.cb_res(3, self.reg.d),
+            0x9B => self.reg.e = self.cb_res(3, self.reg.e),
+            0x9C => self.reg.h = self.cb_res(3, self.reg.h),
+            0x9D => self.reg.l = self.cb_res(3, self.reg.l),
+            0x9E => {
+                let value = self.cb_res(3, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0x9F => self.reg.a = self.cb_res(3, self.reg.a),
+            0xA0 => self.reg.b = self.cb_res(4, self.reg.b),
+            0xA1 => self.reg.c = self.cb_res(4, self.reg.c),
+            0xA2 => self.reg.d = self.cb_res(4, self.reg.d),
+            0xA3 => self.reg.e = self.cb_res(4, self.reg.e),
+            0xA4 => self.reg.h = self.cb_res(4, self.reg.h),
+            0xA5 => self.reg.l = self.cb_res(4, self.reg.l),
+            0xA6 => {
+                let value = self.cb_res(4, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xA7 => self.reg.a = self.cb_res(4, self.reg.a),
+            0xA8 => self.reg.b = self.cb_res(5, self.reg.b),
+            0xA9 => self.reg.c = self.cb_res(5, self.reg.c),
+            0xAA => self.reg.d = self.cb_res(5, self.reg.d),
+            0xAB => self.reg.e = self.cb_res(5, self.reg.e),
+            0xAC => self.reg.h = self.cb_res(5, self.reg.h),
+            0xAD => self.reg.l = self.cb_res(5, self.reg.l),
+            0xAE => {
+                let value = self.cb_res(5, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xAF => self.reg.a = self.cb_res(5, self.reg.a),
+            0xB0 => self.reg.b = self.cb_res(6, self.reg.b),
+            0xB1 => self.reg.c = self.cb_res(6, self.reg.c),
+            0xB2 => self.reg.d = self.cb_res(6, self.reg.d),
+            0xB3 => self.reg.e = self.cb_res(6, self.reg.e),
+            0xB4 => self.reg.h = self.cb_res(6, self.reg.h),
+            0xB5 => self.reg.l = self.cb_res(6, self.reg.l),
+            0xB6 => {
+                let value = self.cb_res(6, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xB7 => self.reg.a = self.cb_res(6, self.reg.a),
+            0xB8 => self.reg.b = self.cb_res(7, self.reg.b),
+            0xB9 => self.reg.c = self.cb_res(7, self.reg.c),
+            0xBA => self.reg.d = self.cb_res(7, self.reg.d),
+            0xBB => self.reg.e = self.cb_res(7, self.reg.e),
+            0xBC => self.reg.h = self.cb_res(7, self.reg.h),
+            0xBD => self.reg.l = self.cb_res(7, self.reg.l),
+            0xBE => {
+                let value = self.cb_res(7, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xBF => self.reg.a = self.cb_res(7, self.reg.a),
+            0xC0 => self.reg.b = self.cb_set(0, self.reg.b),
+            0xC1 => self.reg.c = self.cb_set(0, self.reg.c),
+            0xC2 => self.reg.d = self.cb_set(0, self.reg.d),
+            0xC3 => self.reg.e = self.cb_set(0, self.reg.e),
+            0xC4 => self.reg.h = self.cb_set(0, self.reg.h),
+            0xC5 => self.reg.l = self.cb_set(0, self.reg.l),
+            0xC6 => {
+                let value = self.cb_set(0, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xC7 => self.reg.a = self.cb_set(0, self.reg.a),
+            0xC8 => self.reg.b = self.cb_set(1, self.reg.b),
+            0xC9 => self.reg.c = self.cb_set(1, self.reg.c),
+            0xCA => self.reg.d = self.cb_set(1, self.reg.d),
+            0xCB => self.reg.e = self.cb_set(1, self.reg.e),
+            0xCC => self.reg.h = self.cb_set(1, self.reg.h),
+            0xCD => self.reg.l = self.cb_set(1, self.reg.l),
+            0xCE => {
+                let value = self.cb_set(1, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xCF => self.reg.a = self.cb_set(1, self.reg.a),
+            0xD0 => self.reg.b = self.cb_set(2, self.reg.b),
+            0xD1 => self.reg.c = self.cb_set(2, self.reg.c),
+            0xD2 => self.reg.d = self.cb_set(2, self.reg.d),
+            0xD3 => self.reg.e = self.cb_set(2, self.reg.e),
+            0xD4 => self.reg.h = self.cb_set(2, self.reg.h),
+            0xD5 => self.reg.l = self.cb_set(2, self.reg.l),
+            0xD6 => {
+                let value = self.cb_set(2, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xD7 => self.reg.a = self.cb_set(2, self.reg.a),
+            0xD8 => self.reg.b = self.cb_set(3, self.reg.b),
+            0xD9 => self.reg.c = self.cb_set(3, self.reg.c),
+            0xDA => self.reg.d = self.cb_set(3, self.reg.d),
+            0xDB => self.reg.e = self.cb_set(3, self.reg.e),
+            0xDC => self.reg.h = self.cb_set(3, self.reg.h),
+            0xDD => self.reg.l = self.cb_set(3, self.reg.l),
+            0xDE => {
+                let value = self.cb_set(3, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xDF => self.reg.a = self.cb_set(3, self.reg.a),
+            0xE0 => self.reg.b = self.cb_set(4, self.reg.b),
+            0xE1 => self.reg.c = self.cb_set(4, self.reg.c),
+            0xE2 => self.reg.d = self.cb_set(4, self.reg.d),
+            0xE3 => self.reg.e = self.cb_set(4, self.reg.e),
+            0xE4 => self.reg.h = self.cb_set(4, self.reg.h),
+            0xE5 => self.reg.l = self.cb_set(4, self.reg.l),
+            0xE6 => {
+                let value = self.cb_set(4, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xE7 => self.reg.a = self.cb_set(4, self.reg.a),
+            0xE8 => self.reg.b = self.cb_set(5, self.reg.b),
+            0xE9 => self.reg.c = self.cb_set(5, self.reg.c),
+            0xEA => self.reg.d = self.cb_set(5, self.reg.d),
+            0xEB => self.reg.e = self.cb_set(5, self.reg.e),
+            0xEC => self.reg.h = self.cb_set(5, self.reg.h),
+            0xED => self.reg.l = self.cb_set(5, self.reg.l),
+            0xEE => {
+                let value = self.cb_set(5, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xEF => self.reg.a = self.cb_set(5, self.reg.a),
+            0xF0 => self.reg.b = self.cb_set(6, self.reg.b),
+            0xF1 => self.reg.c = self.cb_set(6, self.reg.c),
+            0xF2 => self.reg.d = self.cb_set(6, self.reg.d),
+            0xF3 => self.reg.e = self.cb_set(6, self.reg.e),
+            0xF4 => self.reg.h = self.cb_set(6, self.reg.h),
+            0xF5 => self.reg.l = self.cb_set(6, self.reg.l),
+            0xF6 => {
+                let value = self.cb_set(6, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xF7 => self.reg.a = self.cb_set(6, self.reg.a),
+            0xF8 => self.reg.b = self.cb_set(7, self.reg.b),
+            0xF9 => self.reg.c = self.cb_set(7, self.reg.c),
+            0xFA => self.reg.d = self.cb_set(7, self.reg.d),
+            0xFB => self.reg.e = self.cb_set(7, self.reg.e),
+            0xFC => self.reg.h = self.cb_set(7, self.reg.h),
+            0xFD => self.reg.l = self.cb_set(7, self.reg.l),
+            0xFE => {
+                let value = self.cb_set(7, self.bus.read_byte(self.reg.get_hl()));
+                self.bus.write_byte(self.reg.get_hl(), value);
+            }
+            0xFF => self.reg.a = self.cb_set(7, self.reg.a),
         }
     }
 
@@ -1003,9 +1449,8 @@ impl Cpu {
     fn call_z(&mut self) {
         if self.flag_is_active(Flags::Zero) {
             self.m = 6;
-            self.reg.sp -= 2;
-            self.mmu.write_word(self.reg.sp.into(), self.reg.pc + 2);
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.push_stack(self.reg.pc + 2);
+            self.reg.pc = self.read_word();
         } else {
             self.m = 3;
             self.reg.pc += 2;
@@ -1016,32 +1461,39 @@ impl Cpu {
     fn call(&mut self) {
         self.m = 6;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc + 2);
-        self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+        self.push_stack(self.reg.pc + 2);
+        self.reg.pc = self.read_word();
     }
 
     // add 8-bit immediate and carry flag to register A
     fn adc_a(&mut self) {
         self.m = 2;
 
-        self.reg.a = self
-            .reg
-            .a
-            .wrapping_add(self.mmu.read_byte(self.reg.pc.into()) + self.get_flag(Flags::Carry));
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.a & 0x7 == 0);
-        self.set_flag_on_if(Flags::Carry, self.reg.a & 0x80 == 0);
-        self.reg.pc += 2;
+        let carry = if self.flag_is_active(Flags::Carry) {
+            1
+        } else {
+            0
+        };
+        let value = self.read_byte();
+        let result = self.reg.a.wrapping_add(value).wrapping_add(carry);
+        self.unset_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.set_flag_on_if(
+            Flags::HalfCarry,
+            (self.reg.a & 0xF) + (value & 0xF) + carry > 0xF,
+        );
+        self.set_flag_on_if(
+            Flags::Carry,
+            self.reg.a as u16 + value as u16 + carry as u16 > 0xFF,
+        );
+        self.reg.a = result;
     }
 
     // call address
     fn rst_one(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x08;
     }
 
@@ -1049,8 +1501,7 @@ impl Cpu {
     fn ret_nc(&mut self) {
         if !self.flag_is_active(Flags::Carry) {
             self.m = 5;
-            self.reg.pc = self.mmu.read_word(self.reg.sp.into());
-            self.reg.sp += 2;
+            self.reg.pc = self.pop_stack();
         } else {
             self.m = 2;
         }
@@ -1060,15 +1511,15 @@ impl Cpu {
     fn pop_de(&mut self) {
         self.m = 3;
 
-        self.reg.set_de(self.mmu.read_word(self.reg.sp.into()));
-        self.reg.sp += 2;
+        let value = self.pop_stack();
+        self.reg.set_de(value);
     }
 
     // jump to address if condition is met
     fn jp_nc(&mut self) {
         if !self.flag_is_active(Flags::Carry) {
             self.m = 4;
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.reg.pc = self.read_word();
         } else {
             self.m = 3;
             self.reg.pc += 2;
@@ -1079,9 +1530,8 @@ impl Cpu {
     fn call_nc(&mut self) {
         if !self.flag_is_active(Flags::Carry) {
             self.m = 6;
-            self.reg.sp -= 2;
-            self.mmu.write_word(self.reg.sp.into(), self.reg.pc + 2);
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.push_stack(self.reg.pc + 2);
+            self.reg.pc = self.read_word();
         } else {
             self.m = 3;
             self.reg.pc += 2;
@@ -1092,45 +1542,40 @@ impl Cpu {
     fn push_de(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.get_de());
+        self.push_stack(self.reg.get_de());
     }
 
     // subtract 8-bit immediate from contents of register A
-    fn sub(&mut self) {
+    fn sub_imm(&mut self) {
         self.m = 2;
 
-        self.reg.a = self
-            .reg
-            .a
-            .wrapping_sub(self.mmu.read_byte(self.reg.pc.into()));
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.a > 0xF);
-        self.set_flag_on_if(
-            Flags::Carry,
-            self.reg.a < self.mmu.read_byte(self.reg.pc.into()),
-        );
-        self.reg.pc += 1;
+        let carry = if self.flag_is_active(Flags::Carry) {
+            1
+        } else {
+            0
+        };
+        let value = self.read_byte();
+        let result = self.reg.a.wrapping_sub(value).wrapping_sub(carry);
+        self.set_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.set_flag_on_if(Flags::HalfCarry, (self.reg.a & 0xF) < (value & 0xF) + carry);
+        self.set_flag_on_if(Flags::Carry, self.reg.a < value + carry);
+        self.reg.a = result;
     }
 
     // call address
     fn rst_two(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x10;
     }
 
     // return from subroutine if condition is met
     fn ret_c(&mut self) {
-        self.reg.pc += 1;
-
         if self.flag_is_active(Flags::Carry) {
             self.m = 5;
-            self.reg.pc = self.mmu.read_word(self.reg.sp.into());
-            self.reg.sp += 2;
+            self.reg.pc = self.pop_stack();
         } else {
             self.m = 2;
         }
@@ -1140,16 +1585,15 @@ impl Cpu {
     fn reti(&mut self) {
         self.m = 4;
 
-        self.reg.pc = self.mmu.read_word(self.reg.sp.into());
-        self.reg.sp = self.reg.sp.wrapping_add(2);
-        self.ei = true;
+        self.reg.pc = self.pop_stack();
+        self.should_interrupt = true;
     }
 
     // jump to address if condition is met
     fn jp_c(&mut self) {
         if self.flag_is_active(Flags::Carry) {
             self.m = 4;
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.reg.pc = self.read_word();
         } else {
             self.m = 3;
             self.reg.pc += 2;
@@ -1160,9 +1604,8 @@ impl Cpu {
     fn call_c(&mut self) {
         if self.flag_is_active(Flags::Carry) {
             self.m = 6;
-            self.reg.sp -= 2;
-            self.mmu.write_word(self.reg.sp.into(), self.reg.pc + 2);
-            self.reg.pc = self.mmu.read_word(self.reg.pc.into());
+            self.push_stack(self.reg.pc + 2);
+            self.reg.pc = self.read_word();
         } else {
             self.m = 3;
             self.reg.pc += 2;
@@ -1173,30 +1616,25 @@ impl Cpu {
     fn sbc_a(&mut self) {
         self.m = 2;
 
-        self.reg.a = self
-            .reg
-            .a
-            .wrapping_sub(self.mmu.read_byte(self.reg.pc.into()) + self.get_flag(Flags::Carry));
-        self.set_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.a > 0xF);
-        self.set_flag_on_if(
-            Flags::Carry,
-            self.mmu
-                .read_byte(self.reg.pc.into())
-                .wrapping_add(self.get_flag(Flags::Carry))
-                > self.reg.a,
-        );
-        self.reg.pc += 1;
+        let carry = if self.flag_is_active(Flags::Carry) {
+            1
+        } else {
+            0
+        };
+        let value = self.read_byte();
+        let result = self.reg.a.wrapping_sub(value).wrapping_sub(carry);
+        self.set_flag(Flags::Negative);
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.set_flag_on_if(Flags::HalfCarry, (self.reg.a & 0xF) < (value & 0xF) + carry);
+        self.set_flag_on_if(Flags::Carry, self.reg.a < value + carry);
+        self.reg.a = result;
     }
 
     // call adress
     fn rst_three(&mut self) {
-        self.reg.pc += 1;
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x18;
     }
 
@@ -1204,54 +1642,48 @@ impl Cpu {
     fn ld_addr_a(&mut self) {
         self.m = 3;
 
-        self.mmu.write_byte(
-            (0xFF00 | self.mmu.read_byte(self.reg.pc.into()) as u16).into(),
-            self.reg.a,
-        );
-        self.reg.pc += 1;
+        let value = self.read_byte();
+        self.bus.write_byte(0xFF00 | value as u16, self.reg.a);
     }
 
     // pop contents from memory stack into register pair HL
     fn pop_hl(&mut self) {
         self.m = 3;
 
-        self.reg.set_hl(self.mmu.read_word(self.reg.sp.into()));
-        self.reg.sp += 2;
+        let value = self.pop_stack();
+        self.reg.set_hl(value);
     }
 
     // store contents of register A in the internal ram, port register or mode register
     fn ld_addr_c_a(&mut self) {
         self.m = 2;
-        self.mmu
-            .write_byte((0xFF00 | self.reg.c as u16).into(), self.reg.a);
+        self.bus.write_byte(0xFF00 | self.reg.c as u16, self.reg.a);
     }
 
     // push contents of register pair HL onto the memory stack
     fn push_hl(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.get_hl());
+        self.push_stack(self.reg.get_hl());
     }
 
     // bitwise AND value with register A
     fn and_a(&mut self) {
         self.m = 2;
 
-        self.reg.a &= self.mmu.read_byte(self.reg.pc.into());
-        self.unset_flag(Flags::Operation);
+        let result = self.reg.a & self.read_byte();
+        self.unset_flag(Flags::Negative);
         self.unset_flag(Flags::Carry);
         self.set_flag(Flags::HalfCarry);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.reg.a = result;
     }
 
-    // call adress
+    // call address
     fn rst_four(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x20;
     }
 
@@ -1259,14 +1691,7 @@ impl Cpu {
     fn add_sp(&mut self) {
         self.m = 4;
 
-        self.reg.sp = self
-            .reg
-            .sp
-            .wrapping_add(self.mmu.read_byte(self.reg.pc.into()) as i8 as i16 as u16);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.sp > 0x07FF);
-        self.set_flag_on_if(Flags::Carry, self.reg.sp > 0x7FF);
-        self.reg.pc += 1;
+        self.add16_imm(self.reg.sp);
     }
 
     // load contents of register pair HL into the pc
@@ -1281,90 +1706,83 @@ impl Cpu {
     fn ld_addr_a16_a(&mut self) {
         self.m = 4;
 
-        self.mmu
-            .write_byte((self.mmu.read_word(self.reg.pc.into())).into(), self.reg.a);
-        self.reg.pc += 2;
+        let address = self.read_word();
+        self.bus.write_byte(address, self.reg.a);
     }
 
     // bitwise xor a and 8-bit immediate operand
     fn xor_d8(&mut self) {
         self.m = 2;
 
-        self.reg.a ^= self.mmu.read_byte(self.reg.pc.into());
-        self.unset_flag(Flags::Operation);
+        let value = self.read_byte();
+        let result = self.reg.a ^ value;
+        self.unset_flag(Flags::Negative);
         self.unset_flag(Flags::HalfCarry);
         self.unset_flag(Flags::Carry);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.reg.a = result;
     }
 
     // call adress
     fn rst_five(&mut self) {
-        self.reg.pc += 1;
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x28;
     }
 
     // load into register A the contents of the internal ram, port register or mode register
     fn ld_a_a8(&mut self) {
         self.m = 3;
-        self.reg.a = self
-            .mmu
-            .read_byte((0xFF00 | self.mmu.read_byte(self.reg.pc.into()) as u16).into());
+
+        let value = 0xFF00 | self.read_byte() as u16;
+        self.reg.a = self.bus.read_byte(value);
     }
 
     // pop contents of the memory stack into register pair AF
     fn pop_af(&mut self) {
-        self.reg.pc += 1;
         self.m = 3;
 
-        self.reg
-            .set_af(self.mmu.read_word(self.reg.sp.into()) & 0xFFF0);
-        self.reg.sp += 2;
+        let value = self.pop_stack();
+        self.reg.set_af(value & 0xFFF0);
     }
 
     // load into register A the contents of internal ram, port register or mode register
     fn ld_a_c_addr(&mut self) {
         self.m = 2;
-        self.reg.a = self.mmu.read_byte((0xFF00 | self.reg.c as u16).into());
+        self.reg.a = self.bus.read_byte(0xFF00 | self.reg.c as u16);
     }
 
     // reset interrupt master enable(IME) flag and prohibit maskable interrupts
     fn di(&mut self) {
         self.m = 1;
-        self.di = true;
+        self.should_interrupt = false;
     }
 
     // push contents of register pair AF onto the memory stack
     fn push_af(&mut self) {
-        self.reg.pc += 1;
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.get_af());
+        self.push_stack(self.reg.get_af());
     }
 
     // store bitwise OR of 8-bit immediate operand and register A
     fn or_d8(&mut self) {
         self.m = 2;
 
-        self.reg.a |= self.mmu.read_byte(self.reg.pc.into());
-        self.unset_flag(Flags::Operation);
+        let result = self.reg.a | self.read_byte();
+        self.unset_flag(Flags::Negative);
         self.unset_flag(Flags::HalfCarry);
         self.unset_flag(Flags::Carry);
-        self.set_flag_on_if(Flags::Zero, self.reg.a == 0);
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::Zero, result == 0);
+        self.reg.a = result;
     }
 
     // call adress
     fn rst_six(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x30;
     }
 
@@ -1372,13 +1790,8 @@ impl Cpu {
     fn ld_hl_sp_s8(&mut self) {
         self.m = 3;
 
-        let operand = self.mmu.read_byte(self.reg.pc.into()) as i8 as i16 as u16;
-        self.reg.set_hl(self.reg.sp.wrapping_add(operand));
-        self.unset_flag(Flags::Zero);
-        self.unset_flag(Flags::Operation);
-        self.set_flag_on_if(Flags::HalfCarry, self.reg.get_hl() > 0x07FF);
-        self.set_flag_on_if(Flags::Carry, self.reg.get_hl() > 0x7FF);
-        self.reg.pc += 1;
+        let value = self.add16_imm(self.reg.sp);
+        self.reg.set_hl(value);
     }
 
     // load contents of register pair HL into sp
@@ -1390,56 +1803,48 @@ impl Cpu {
 
     // load contents of internal ram or register specified
     // by 16-bit immediate operand into register A
-    // TODO: confirm it works
     fn ld_a_a16(&mut self) {
-        self.reg.pc += 3;
         self.m = 4;
 
-        self.reg.a = self
-            .mmu
-            .read_byte((self.mmu.read_word(self.reg.pc.into())).into());
+        let value = self.read_word();
+        self.reg.a = self.bus.read_byte(value);
     }
 
     // set the interrupt master enable(IME) flag and
     // enable maskable interrupts
-    // TODO: confirm it works
     fn ei(&mut self) {
         self.m = 1;
-        self.ei = true;
+        self.should_interrupt = true;
     }
 
     // compare contents of register A and 8-bit immediate operand
     fn cp_d8(&mut self) {
         self.m = 2;
 
-        let result = self
-            .reg
-            .a
-            .wrapping_sub(self.mmu.read_byte(self.reg.pc as usize));
-        self.reg.a = result;
-        self.set_flag(Flags::Operation);
+        let carry = if self.flag_is_active(Flags::Carry) {
+            1
+        } else {
+            0
+        };
+        let value = self.read_byte();
+        let result = self.reg.a.wrapping_sub(value);
+        self.set_flag(Flags::Negative);
         self.set_flag_on_if(Flags::Zero, result == 0);
-        self.set_flag_on_if(Flags::HalfCarry, result > 0xF);
-        self.set_flag_on_if(
-            Flags::Carry,
-            self.mmu.working_ram[self.reg.pc as usize] > self.reg.a,
-        );
-        self.reg.pc += 1;
+        self.set_flag_on_if(Flags::HalfCarry, (self.reg.a & 0xF) < (value & 0xF) + carry);
+        self.set_flag_on_if(Flags::Carry, self.reg.a < value + carry);
     }
 
     // call address
     fn rst_seven(&mut self) {
         self.m = 4;
 
-        self.reg.sp -= 2;
-        self.mmu.write_word(self.reg.sp.into(), self.reg.pc);
+        self.push_stack(self.reg.pc);
         self.reg.pc = 0x38;
     }
 
-    pub fn decode_execute(&mut self) {
-        self.current_opcode = self.mmu.read_byte(self.reg.pc.into());
-        self.reg.pc += 1;
-        match self.current_opcode {
+    fn decode_execute(&mut self) {
+        let opcode = self.read_byte();
+        match opcode {
             0x00 => self.nop(),
             0x01 => self.load_bc(),
             0x02 => self.load_bc_a(),
@@ -1504,12 +1909,12 @@ impl Cpu {
             0x3D => self.dec_a(),
             0x3E => self.ld_a_byte(),
             0x3F => self.ccf(),
-            0x40..=0x7F => self.parse_load_opcodes(),
-            0x80..=0x9F => self.parse_math_opcodes(),
-            0xA0..=0xA7 => self.parse_and_opcodes(),
-            0xA8..=0xAF => self.parse_xor_opcodes(),
-            0xB0..=0xB7 => self.parse_or_opcodes(),
-            0xB8..=0xBF => self.parse_cp_opcodes(),
+            0x40..=0x7F => self.parse_load_opcodes(opcode),
+            0x80..=0x9F => self.parse_math_opcodes(opcode),
+            0xA0..=0xA7 => self.parse_and_opcodes(opcode),
+            0xA8..=0xAF => self.parse_xor_opcodes(opcode),
+            0xB0..=0xB7 => self.parse_or_opcodes(opcode),
+            0xB8..=0xBF => self.parse_cp_opcodes(opcode),
             0xC0 => self.ret_nz(),
             0xC1 => self.pop_bc(),
             0xC2 => self.jp_nz(),
@@ -1521,6 +1926,7 @@ impl Cpu {
             0xC8 => self.ret_z(),
             0xC9 => self.ret(),
             0xCA => self.jp_z(),
+            0xCB => self.call_cb(),
             0xCC => self.call_z(),
             0xCD => self.call(),
             0xCE => self.adc_a(),
@@ -1530,7 +1936,7 @@ impl Cpu {
             0xD2 => self.jp_nc(),
             0xD4 => self.call_nc(),
             0xD5 => self.push_de(),
-            0xD6 => self.sub(),
+            0xD6 => self.sub_imm(),
             0xD7 => self.rst_two(),
             0xD8 => self.ret_c(),
             0xD9 => self.reti(),
@@ -1562,9 +1968,25 @@ impl Cpu {
             0xFB => self.ei(),
             0xFE => self.cp_d8(),
             0xFF => self.rst_seven(),
-            _ => println!("{:#X} is not a recognized opcode...", self.current_opcode),
+            _ => println!("{opcode:#X} is not a recognized opcode..."),
         }
-        println!(" {:#X}", self.current_opcode);
+    }
+
+    pub fn run_cycle(&mut self) {
+        if !self.halted {
+            self.print_register_data();
+            self.decode_execute();
+            self.bus.timer.update(self.m);
+            if self.should_interrupt && self.bus.timer.interrupt {
+                println!("TIMER INTERRUPT");
+                println!("TIMER INTERRUPT");
+                println!("TIMER INTERRUPT");
+                println!("TIMER INTERRUPT");
+                println!("TIMER INTERRUPT");
+                self.push_stack(self.reg.pc);
+                self.reg.pc = 0x0040;
+            }
+        }
     }
 }
 
@@ -1573,394 +1995,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_nop() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 1;
-        let expected_pc = cpu.reg.pc + 1;
-
-        // Act
-        cpu.nop();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
+    fn test_correct_resetting_of_flags() {
+        let mut cpu = Cpu::new(Path::new(
+            "gb-test-roms/cpu_instrs/individual/01-special.gb",
+        ));
+        cpu.reset_flags();
+        assert_eq!(0, cpu.reg.f);
     }
 
     #[test]
-    fn test_load_bc() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 3;
-        let expected_pc = cpu.reg.pc + 3;
-        // 244 << 8 | 128
-        let expected_bc: u16 = 62592;
-        cpu.mmu.working_ram[expected_pc as usize] = 244;
-        cpu.mmu.working_ram[expected_pc as usize + 1] = 128;
-
-        // Act
-        cpu.load_bc();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_bc, cpu.reg.get_bc());
+    fn test_correct_setting_of_flag() {
+        let mut cpu = Cpu::new(Path::new(
+            "gb-test-roms/cpu_instrs/individual/01-special.gb",
+        ));
+        cpu.reset_flags();
+        cpu.set_flag(Flags::Carry);
+        assert_eq!(0x10, cpu.reg.f);
+        cpu.set_flag(Flags::HalfCarry);
+        assert_eq!(0x30, cpu.reg.f);
     }
 
     #[test]
-    fn test_load_bc_a() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 2;
-        let expected_pc = cpu.reg.pc + 1;
-        let register_a = 235;
-
-        // Act
-        cpu.reg.a = register_a;
-        cpu.load_bc_a();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(register_a, cpu.mmu.working_ram[cpu.reg.get_bc() as usize]);
+    fn test_correct_unsetting_of_flag() {
+        let mut cpu = Cpu::new(Path::new(
+            "gb-test-roms/cpu_instrs/individual/01-special.gb",
+        ));
+        cpu.unset_flag(Flags::Zero);
+        assert_eq!(0x30, cpu.reg.f);
     }
 
     #[test]
-    fn test_inc_bc() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 2;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_register_bc = cpu.reg.get_bc() + 1;
-
-        // Act
-        cpu.inc_bc();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_register_bc, cpu.reg.get_bc());
-    }
-
-    #[test]
-    // TODO: still need to test cases:
-    // when b = 0
-    // when b > 0x8
-    fn test_inc_b() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 1;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_register_b_value = 1;
-        let expected_register_f_value = 0x0;
-
-        // Act
-        cpu.inc_b();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_register_b_value, cpu.reg.b);
-        assert_eq!(expected_register_f_value, cpu.reg.f);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_dec_b() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 1;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_register_b_value = 4;
-        let expected_register_f_value = u8::from(Flags::Operation);
-
-        // Act
-        cpu.reg.b = 5;
-        cpu.dec_b();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_register_b_value, cpu.reg.b);
-        assert_eq!(expected_register_f_value, cpu.reg.f);
-
-        cpu.reg.b = 17;
-        cpu.dec_b();
-        let expected_register_f_value = u8::from(Flags::HalfCarry) + u8::from(Flags::Operation);
-        assert_eq!(expected_register_f_value, cpu.reg.f);
-
-        // This should make the test panic
-        cpu.reg.b = 0;
-        cpu.dec_b();
-    }
-
-    #[test]
-    fn test_load_b() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 2;
-        let expected_pc = cpu.reg.pc + 2;
-        let expected_b_load_value = 235;
-        // since the program counter starts at 0x0100
-        // then we add two to the program counter we arrive
-        // at position 0x0102
-        cpu.mmu.working_ram[expected_pc as usize] = expected_b_load_value;
-
-        // Act
-        cpu.load_b();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_b_load_value, cpu.reg.b);
-    }
-
-    #[test]
-    fn test_rlca() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 1;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_register_f_value = 0;
-        let expected_register_a_value: u8 = 4;
-        let expected_register_a_value_with_carry = 1;
-
-        // Act
-        cpu.reg.a = 2;
-        cpu.rlca();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_register_f_value, cpu.reg.f);
-        assert_eq!(expected_register_a_value, cpu.reg.a);
-
-        cpu.reg.a = 128;
-        cpu.rlca();
-
-        assert_eq!(expected_register_a_value_with_carry, cpu.reg.a);
-    }
-
-    #[test]
-    fn test_load_sp() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 5;
-        let expected_pc = cpu.reg.pc + 3;
-        // based on setting the sp at 32678
-        let expected_sp_lower_byte = 166;
-        let expected_sp_upper_byte = 127;
-
-        // Act
-        cpu.reg.sp = 32678;
-        cpu.load_sp_at_addr();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(
-            expected_sp_lower_byte,
-            cpu.mmu.working_ram[expected_pc as usize]
-        );
-        assert_eq!(
-            expected_sp_upper_byte,
-            cpu.mmu.working_ram[expected_pc as usize + 1]
-        );
-    }
-
-    #[test]
-    fn test_add_hl_bc() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 2;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_hl = 16555;
-        let expected_bc = 32678;
-        let expected_f_register = cpu.reg.f & !u8::from(Flags::Operation);
-        let expected_f_register_after_half_carry = u8::from(Flags::HalfCarry);
-        let expected_f_register_after_carry = u8::from(Flags::Carry);
-
-        // Act
-        cpu.reg.set_hl(expected_hl);
-        cpu.reg.set_bc(expected_bc);
-        cpu.add_hl_bc();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_hl + expected_bc, cpu.reg.get_hl());
-        assert_eq!(expected_f_register_after_carry, cpu.reg.f);
-
-        cpu = Cpu::new();
-        cpu.reg.set_hl(1000);
-        cpu.reg.set_bc(2048);
-        cpu.add_hl_bc();
-        assert_eq!(expected_f_register_after_half_carry, cpu.reg.f);
-
-        cpu = Cpu::new();
-        cpu.reg.set_hl(155);
-        cpu.reg.set_bc(155);
-        cpu.add_hl_bc();
-        assert_eq!(expected_f_register, cpu.reg.f);
-    }
-
-    #[test]
-    fn test_ld_a_bc() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 2;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_a = 255;
-        cpu.mmu.working_ram[cpu.reg.get_bc() as usize] = expected_a;
-
-        // Act
-        cpu.ld_a_bc();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_a, cpu.mmu.working_ram[cpu.reg.get_bc() as usize]);
-    }
-
-    #[test]
-    fn test_dec_bc() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 2;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_bc = 9;
-        cpu.reg.set_bc(10);
-
-        // Act
-        cpu.dec_bc();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_bc, cpu.reg.get_bc());
-    }
-
-    #[test]
-    fn test_inc_c() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 1;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_c = 241;
-        cpu.reg.c = 240;
-
-        // Act
-        cpu.inc_c();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_c, cpu.reg.c);
-        assert_eq!(
-            cpu.reg.f & !u8::from(Flags::Operation) | u8::from(Flags::HalfCarry),
-            cpu.reg.f
-        );
-    }
-
-    #[test]
-    fn test_dec_c() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 1;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_c = 24;
-        cpu.reg.c = 25;
-
-        // Act
-        cpu.dec_c();
-
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_c, cpu.reg.c);
-
-        cpu = Cpu::new();
-        cpu.reg.c = 1;
-        cpu.dec_c();
-        println!("{}", cpu.reg.c);
-
-        assert_eq!(
-            u8::from(Flags::Operation) | u8::from(Flags::Zero),
-            cpu.reg.f
-        );
-
-        cpu = Cpu::new();
-        cpu.reg.c = 17;
-        cpu.dec_c();
-
-        assert_eq!(
-            u8::from(Flags::Operation) | u8::from(Flags::HalfCarry),
-            cpu.reg.f
-        );
-    }
-
-    #[test]
-    fn test_ld_c() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 2;
-        let expected_pc = cpu.reg.pc + 2;
-        let expected_c = 25;
-        cpu.mmu.working_ram[expected_pc as usize] = 25;
-
-        // Act
-        cpu.ld_c();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_c, cpu.reg.c);
-    }
-
-    #[test]
-    fn test_rrca() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 1;
-        let expected_pc = cpu.reg.pc + 1;
-        let expected_register_f = u8::from(Flags::None);
-        // 240 >> 1
-        let expected_a = 120;
-        cpu.reg.a = 240;
-
-        // Act
-        cpu.rrca();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_register_f, cpu.reg.f);
-        assert_eq!(expected_a, cpu.reg.a);
-
-        cpu = Cpu::new();
-        let expected_a = 248;
-        cpu.reg.a = 241;
-        cpu.rrca();
-
-        assert_eq!(expected_a, cpu.reg.a);
-    }
-
-    #[test]
-    fn test_ld_de() {
-        // Arrange
-        let mut cpu = Cpu::new();
-        let expected_m_cycles = 3;
-        let expected_pc = cpu.reg.pc + 3;
-        // 244 << 8 | 128
-        let expected_de: u16 = 62592;
-        cpu.mmu.working_ram[expected_pc as usize] = 244;
-        cpu.mmu.working_ram[expected_pc as usize + 1] = 128;
-
-        // Act
-        cpu.ld_de();
-
-        // Assert
-        assert_eq!(expected_m_cycles, cpu.m);
-        assert_eq!(expected_pc, cpu.reg.pc);
-        assert_eq!(expected_de, cpu.reg.get_de());
+    fn test_if_flag_is_active() {
+        let cpu = Cpu::new(Path::new(
+            "gb-test-roms/cpu_instrs/individual/01-special.gb",
+        ));
+        assert_eq!(true, cpu.flag_is_active(Flags::Zero));
+        assert_eq!(true, cpu.flag_is_active(Flags::Carry));
+        assert_eq!(true, cpu.flag_is_active(Flags::HalfCarry));
     }
 }

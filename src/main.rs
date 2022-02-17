@@ -1,19 +1,23 @@
+mod bus;
+mod cartridge;
 mod cpu;
 mod gameboy;
-mod mmu;
 mod register;
-mod util;
+mod serial;
+mod timer;
 
 use std::{env, path::Path};
 
 use gameboy::Gameboy;
-use util::window_conf;
 
-#[macroquad::main(window_conf)]
-async fn main() {
+fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let mut gameboy = Gameboy::new();
-    gameboy.load_rom(Path::new(&args[1])).unwrap();
-    gameboy.run().await;
+    match args.len() {
+        2 => {
+            let mut gameboy = Gameboy::new(Path::new(&args[1]));
+            gameboy.run();
+        }
+        _ => eprintln!("Usage: cargo run <ROM>"),
+    }
 }
