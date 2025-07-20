@@ -1,3 +1,5 @@
+use std::cmp::min;
+
 // built-in timer in the gameboy
 
 // TIMA timer updates at a configurable rate, depends on frequency set in TAC register
@@ -6,15 +8,6 @@
 // NOTE: we are doing machine cycles and not clock cycles
 
 // TODO: check if timer bit is active or not in tac
-
-const MAX_M_CYCLES_FOR_OPCODE: u8 = 4;
-
-pub struct Clock {
-    primary: u32,
-    div: u32,
-    tima: u32,
-    instr_cycles: u32,
-}
 
 pub struct Timer {
     // divider register
@@ -29,11 +22,11 @@ pub struct Timer {
     tma: u8,
     // timer control
     tac: u8,
+    div_counter: u16,
+
     // enable interrupt
     pub interrupt: bool,
-
-    speed: u8,
-    pub clock: Clock,
+    tima_reload_delay: Option<u8>,
 }
 
 impl Timer {
@@ -43,43 +36,52 @@ impl Timer {
             tima: 0,
             tma: 0,
             tac: 0,
+            div_counter: 0,
             interrupt: false,
+            tima_reload_delay: None,
+        }
+    }
 
-            speed: 0,
-            clock: Clock {
-                primary: 0,
-                div: 0,
-                tima: 0,
-                instr_cycles: 0,
-            },
+    fn timer_enabled(&self) -> bool {
+        self.tac & 0x04 != 0
+    }
+
+    fn get_div_bit(&self, tac: u8) -> u8 {
+        match tac & 0x03 {
+            0 => 9, // 4096 Hz (1024 T-cycles)
+            1 => 3, // 262144 Hz (16 T-cycles)
+            2 => 5, // 65536 Hz (64 T-cycles)
+            3 => 7, // 16384 Hz (256 T-cycles)
+            _ => 9,
         }
     }
 
     pub fn update(&mut self, opcode_cycles: u8) {
-        // check if 4 m-cycles have occured
-        // since no opcode takes more than 4 m-cycles
-        self.clock.instr_cycles += opcode_cycles as u32;
-        if self.clock.instr_cycles >= MAX_M_CYCLES_FOR_OPCODE as u32 {
-            self.clock.primary += 1;
-            self.clock.div += 1;
-            self.clock.instr_cycles -= MAX_M_CYCLES_FOR_OPCODE as u32;
-            if self.clock.div == 0x10 {
-                self.div = self.div.wrapping_add(1);
-                self.clock.div = 0;
+        let old_div_counter = self.div_counter;
+        self.div_counter = self.div_counter.wrapping_add(opcode_cycles as u16);
+        self.div = (self.div_counter >> 8) as u8;
+
+        let bit = self.get_div_bit(self.tac);
+        let old_bit = ((old_div_counter >> bit) & 1) != 0;
+        let new_bit = ((self.div_counter >> bit) & 1) != 0;
+        let timer_enabled = self.timer_enabled();
+
+        if timer_enabled && old_bit && !new_bit {
+            if self.tima == 0xFF {
+                self.tima = 0;
+                self.tima_reload_delay = Some(4);
+            } else {
+                self.tima = self.tima.wrapping_add(1);
             }
         }
 
-        self.get_clock_speed();
-
-        // increment timer(tima) by 1 when primary clock surpasses timer speed
-        if self.clock.primary >= self.speed as u32 {
-            self.clock.primary = 0;
-            self.tima += 1;
-            if self.clock.tima > 0xFF {
-                println!("INTERRUPT NOOOOOOOOW");
+        if let Some(ref mut delay) = self.tima_reload_delay {
+            let dec = min(*delay, opcode_cycles);
+            *delay -= dec;
+            if *delay == 0 {
                 self.tima = self.tma;
-                self.clock.tima -= 0xFF;
                 self.interrupt = true;
+                self.tima_reload_delay = None;
             }
         }
     }
@@ -89,28 +91,54 @@ impl Timer {
             0xFF04 => self.div,
             0xFF05 => self.tima,
             0xFF06 => self.tma,
-            0xFF07 => self.speed,
-            _ => panic!("timer.read_byte() went wrong at: {}", addr),
+            0xFF07 => self.tac,
+            _ => panic!("timer.read_byte() went wrong at: {addr}"),
         }
     }
 
     pub fn write_byte(&mut self, addr: u16, value: u8) {
         match addr {
-            0xFF04 => self.div = 0x00,
-            0xFF05 => self.tima = value,
-            0xFF06 => self.tma = value,
-            0xFF07 => self.tac = value & 0x7,
-            _ => panic!("timer.write_byte() went wrong at: {}", addr),
-        }
-    }
-
-    fn get_clock_speed(&mut self) {
-        self.speed = match self.tac & 0x3 {
-            0x00 => 0x40,
-            0x01 => 0x1,
-            0x02 => 0x4,
-            0x03 => 0x10,
-            _ => panic!("not valid tac speeds"),
+            0xFF04 => {
+                let bit = self.get_div_bit(self.tac);
+                let old_bit = ((self.div_counter >> bit) & 1) != 0;
+                self.div_counter = 0;
+                self.div = 0;
+                let new_bit = false;
+                if self.timer_enabled() && old_bit && !new_bit {
+                    if self.tima == 0xFF {
+                        self.tima = 0;
+                        self.tima_reload_delay = Some(4);
+                    } else {
+                        self.tima = self.tima.wrapping_add(1);
+                    }
+                }
+            }
+            0xFF05 => {
+                self.tima = value;
+                if self.tima_reload_delay.is_some() {
+                    self.tima_reload_delay = None;
+                }
+            }
+            0xFF06 => {
+                self.tma = value;
+            }
+            0xFF07 => {
+                let old_bit = ((self.div_counter >> self.get_div_bit(self.tac)) & 1) != 0;
+                let old_enabled = self.timer_enabled();
+                let new_tac = value & 0x7;
+                let new_bit = ((self.div_counter >> self.get_div_bit(new_tac)) & 1) != 0;
+                let new_enabled = new_tac & 0x4 != 0;
+                if old_enabled && old_bit && (!new_enabled || !new_bit) {
+                    if self.tima == 0xFF {
+                        self.tima = 0;
+                        self.tima_reload_delay = Some(4);
+                    } else {
+                        self.tima = self.tima.wrapping_add(1);
+                    }
+                }
+                self.tac = new_tac;
+            }
+            _ => panic!("timer.write_byte() went wrong at: {addr}"),
         }
     }
 }

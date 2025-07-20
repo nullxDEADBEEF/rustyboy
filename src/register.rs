@@ -1,4 +1,4 @@
-const MAX_FLAG_VALUE: u8 = 0x00F0;
+const MAX_FLAG_VALUE: u8 = 0xF0;
 
 #[derive(Clone, Copy)]
 pub enum Flags {

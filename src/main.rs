@@ -8,7 +8,7 @@ mod timer;
 
 use std::{env, path::Path};
 
-use gameboy::Gameboy;
+use crate::gameboy::Gameboy;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -16,6 +16,9 @@ fn main() {
     match args.len() {
         2 => {
             let mut gameboy = Gameboy::new(Path::new(&args[1]));
+            //for _ in 0..1000 {
+            //    gameboy.cpu.run_cycle();
+            //}
             gameboy.run();
         }
         _ => eprintln!("Usage: cargo run <ROM>"),

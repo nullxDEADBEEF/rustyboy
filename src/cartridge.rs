@@ -2,7 +2,10 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-const ROM_SIZE: u32 = 0x7FFF;
+enum MBCType {
+    RomOnly,
+    MBC1,
+}
 
 pub struct Cartridge {
     title: String,
@@ -12,25 +15,38 @@ pub struct Cartridge {
     rom_version: String,
     data: Vec<u8>,
     checksum: u8,
+    mbc_type: MBCType,
+    rom_bank: u8,
+    ram_bank: u8,
+    banking_mode: u8, // 0 = ROM banking, 1 = RAM banking
 }
 
 impl Cartridge {
     pub fn new() -> Self {
         Self {
-            title: "".to_string(),
+            title: String::new(),
             ctype: "UNKNOWN",
             rom_size: "UNKNOWN",
             ram_size: "UNKNOWN",
-            rom_version: "".to_string(),
-            data: vec![0; ROM_SIZE as usize],
+            rom_version: String::new(),
+            data: Vec::new(),
             checksum: 0,
+            mbc_type: MBCType::RomOnly,
+            rom_bank: 1,
+            ram_bank: 0,
+            banking_mode: 0,
         }
     }
 
     // TODO: add the different MBC's here.
     pub fn load(&mut self, path: &Path) -> Result<(), &str> {
         self.data = fs::read(path).unwrap();
-        println!("{:?} loaded.", path);
+        self.mbc_type = match self.data[0x0147] {
+            0x00 => MBCType::RomOnly,
+            0x01..=0x03 => MBCType::MBC1,
+            _ => MBCType::RomOnly,
+        };
+        //println!("{:?} loaded.", path);
         self.get_title();
         self.get_cartridge_type();
         self.get_rom_size();
@@ -41,11 +57,54 @@ impl Cartridge {
     }
 
     pub fn read_byte(&self, addr: u16) -> u8 {
-        self.data[addr as usize]
+        match self.mbc_type {
+            MBCType::RomOnly => self.data[addr as usize],
+            MBCType::MBC1 => match addr {
+                0x0000..=0x3FFF => self.data[addr as usize],
+                0x4000..=0x7FFF => {
+                    let bank = self.rom_bank & 0x1F;
+                    let bank = if bank == 0 { 1 } else { bank };
+                    let offset = (bank as usize) * 0x4000 + (addr as usize - 0x4000);
+                    self.data.get(offset).copied().unwrap_or(0xFF)
+                }
+                _ => 0xFF,
+            },
+        }
     }
 
     pub fn write_byte(&mut self, addr: u16, value: u8) {
-        self.data[addr as usize] = value;
+        match self.mbc_type {
+            MBCType::RomOnly => {}
+            MBCType::MBC1 => {
+                match addr {
+                    0x0000..=0x1FFF => {
+                        // RAM enable/disable
+                    }
+                    0x2000..=0x3FFF => {
+                        // set lower 5 bits of ROM bank number
+                        self.rom_bank = (self.rom_bank & 0x60) | (value & 0x1F);
+                        if self.rom_bank & 0x1F == 0 {
+                            self.rom_bank = (self.rom_bank & 0xE0) | 1;
+                        }
+                        //println!("ROM BANK SET TO: {}", self.rom_bank);
+                    }
+                    0x4000..=0x5FFF => {
+                        // set upper 2 bits of ROM/RAM bank
+                        if self.banking_mode == 0 {
+                            // ROM banking mode, set bits 5 and 6 of ROM bank
+                            self.rom_bank = (self.rom_bank & 0x1F) | ((value & 0x03) << 5);
+                        } else {
+                            self.ram_bank = value & 0x03;
+                        }
+                    }
+                    0x6000..=0x7FFF => {
+                        // banking mode select
+                        self.banking_mode = value & 0x01;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     // title of the game in upper case ascii
