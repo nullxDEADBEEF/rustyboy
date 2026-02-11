@@ -26,9 +26,9 @@ const HRAM_START: u16 = 0xFF80;
 const HRAM_END: u16 = 0xFFFE;
 const INTERRUPT_ENABLE: u16 = 0xFFFF;
 
-const WRAM_SIZE: u16 = 0x0FFF;
+const WRAM_SIZE: u16 = 0x1FFF;
 const VRAM_SIZE: u16 = 0x1FFF;
-const HRAM_SIZE: u16 = 0x7E;
+const HRAM_SIZE: u16 = 0x7F;
 
 // can be read from or written to by the CPU
 pub struct Bus {

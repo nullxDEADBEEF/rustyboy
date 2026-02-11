@@ -37,12 +37,12 @@ impl Cpu {
         }
     }
 
-    fn handle_interrupts(&mut self) -> bool {
+    fn handle_interrupts(&mut self, push_return: bool) -> bool {
         let ie = self.bus.read_byte(0xFFFF);
         let iflag = self.bus.read_byte(0xFF0F);
 
         let pending = ie & iflag;
-        if self.ime && pending != 0 {
+        if pending != 0 {
             self.halted = false;
 
             let (pc, bit) = if pending & 0x01 != 0 {
@@ -59,16 +59,18 @@ impl Cpu {
                 return false;
             };
 
-            // Disable IME immediately
-            self.ime = false;
-            self.enable_ime_next = false;
+            if self.ime {
+                self.ime = false;
+                self.enable_ime_next = false;
+            }
 
             // Clear IF bit for the interrupt being serviced
             self.bus.write_byte(0xFF0F, iflag & !bit);
 
-            // Push current PC onto stack
-            self.reg.sp = self.reg.sp.wrapping_sub(2);
-            self.bus.write_word(self.reg.sp, self.reg.pc);
+            if push_return {
+                self.reg.sp = self.reg.sp.wrapping_sub(2);
+                self.bus.write_word(self.reg.sp, self.reg.pc);
+            }
 
             // Jump to interrupt handler
             self.reg.pc = pc;
@@ -743,31 +745,26 @@ impl Cpu {
     fn daa(&mut self) {
         self.m = 1;
 
-        let mut a = self.reg.a;
         let n = self.flag_is_active(Flags::Negative);
         let h = self.flag_is_active(Flags::HalfCarry);
         let c = self.flag_is_active(Flags::Carry);
-        let mut set_c = false;
+        let mut a = self.reg.a;
+        let mut new_c = c;
 
         if !n {
             if c || a > 0x99 {
                 a = a.wrapping_add(0x60);
-                set_c = true;
+                new_c = true;
             }
             if h || (a & 0x0F) > 0x09 {
-                let new_a = a.wrapping_add(0x06);
-                if new_a < a {
-                    set_c = true;
-                }
-                a = new_a;
+                a = a.wrapping_add(0x06);
             }
         } else {
+            if h {
+                a = a.wrapping_sub(6);
+            }
             if c {
                 a = a.wrapping_sub(0x60);
-                set_c = true;
-            }
-            if h {
-                a = a.wrapping_sub(0x06);
             }
         }
 
@@ -775,7 +772,7 @@ impl Cpu {
 
         self.set_flag_on_if(Flags::Zero, a == 0);
         self.unset_flag(Flags::HalfCarry);
-        self.set_flag_on_if(Flags::Carry, set_c);
+        self.set_flag_on_if(Flags::Carry, new_c);
     }
 
     // if z flag is active, jump s8 steps from current address else instruction following
@@ -915,13 +912,7 @@ impl Cpu {
         let addr = self.reg.get_hl();
         let orig = self.bus.read_byte(addr);
         let value = orig.wrapping_sub(1);
-        println!(
-            "CPU: PC={:04X} DEC (HL) HL={:04X} Orig={:02X} New={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            orig,
-            value
-        );
+
         self.set_flag(Flags::Negative);
         self.set_flag_on_if(Flags::Zero, value == 0);
         self.set_flag_on_if(Flags::HalfCarry, orig & 0xF == 0);
@@ -934,12 +925,6 @@ impl Cpu {
         self.m = 3;
         let addr = self.reg.get_hl();
         let value = self.read_byte();
-        println!(
-            "CPU: PC={:04X} LD (HL), d8 HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(2),
-            addr,
-            value
-        );
         self.bus.write_byte(addr, value);
     }
 
@@ -1022,7 +1007,7 @@ impl Cpu {
 
     fn ld_b_b(&mut self) {
         self.m = 1;
-        //self.reg.b = self.reg.b;
+        self.reg.b = self.reg.b;
     }
     fn ld_b_c(&mut self) {
         self.m = 1;
@@ -1047,11 +1032,6 @@ impl Cpu {
     fn ld_b_hl(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD B, (HL) HL={:04X}",
-            self.reg.pc.wrapping_sub(1),
-            addr
-        );
         self.reg.b = self.bus.read_byte(addr);
     }
     fn ld_b_a(&mut self) {
@@ -1086,11 +1066,6 @@ impl Cpu {
     fn ld_c_hl(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD C, (HL) HL={:04X}",
-            self.reg.pc.wrapping_sub(1),
-            addr
-        );
         self.reg.c = self.bus.read_byte(addr);
     }
     fn ld_c_a(&mut self) {
@@ -1108,7 +1083,7 @@ impl Cpu {
     }
     fn ld_d_d(&mut self) {
         self.m = 1;
-        //self.reg.d = self.reg.d;
+        self.reg.d = self.reg.d;
     }
     fn ld_d_e(&mut self) {
         self.m = 1;
@@ -1125,11 +1100,6 @@ impl Cpu {
     fn ld_d_hl(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD D, (HL) HL={:04X}",
-            self.reg.pc.wrapping_sub(1),
-            addr
-        );
         self.reg.d = self.bus.read_byte(addr);
     }
     fn ld_d_a(&mut self) {
@@ -1164,11 +1134,6 @@ impl Cpu {
     fn ld_e_hl(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD E, (HL) HL={:04X}",
-            self.reg.pc.wrapping_sub(1),
-            addr
-        );
         self.reg.e = self.bus.read_byte(addr);
     }
     fn ld_e_a(&mut self) {
@@ -1194,7 +1159,7 @@ impl Cpu {
     }
     fn ld_h_h(&mut self) {
         self.m = 1;
-        //self.reg.h = self.reg.h;
+        self.reg.h = self.reg.h;
     }
     fn ld_h_l(&mut self) {
         self.m = 1;
@@ -1203,11 +1168,6 @@ impl Cpu {
     fn ld_h_hl(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD H, (HL) HL={:04X}",
-            self.reg.pc.wrapping_sub(1),
-            addr
-        );
         self.reg.h = self.bus.read_byte(addr);
     }
     fn ld_h_a(&mut self) {
@@ -1237,16 +1197,11 @@ impl Cpu {
     }
     fn ld_l_l(&mut self) {
         self.m = 1;
-        //self.reg.l = self.reg.l;
+        self.reg.l = self.reg.l;
     }
     fn ld_l_hl(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD L, (HL) HL={:04X}",
-            self.reg.pc.wrapping_sub(1),
-            addr
-        );
         self.reg.l = self.bus.read_byte(addr);
     }
     fn ld_l_a(&mut self) {
@@ -1257,78 +1212,36 @@ impl Cpu {
     fn ld_hl_b(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD (HL), B HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            self.reg.b
-        );
         self.bus.write_byte(addr, self.reg.b);
     }
     fn ld_hl_c(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD (HL), C HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            self.reg.c
-        );
         self.bus.write_byte(addr, self.reg.c);
     }
     fn ld_hl_d(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD (HL), D HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            self.reg.d
-        );
         self.bus.write_byte(addr, self.reg.d);
     }
     fn ld_hl_e(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD (HL), E HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            self.reg.e
-        );
         self.bus.write_byte(addr, self.reg.e);
     }
     fn ld_hl_h(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD (HL), H HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            self.reg.h
-        );
         self.bus.write_byte(addr, self.reg.h);
     }
     fn ld_hl_l(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD (HL), L HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            self.reg.l
-        );
         self.bus.write_byte(addr, self.reg.l);
     }
     fn ld_hl_a(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD (HL), A HL={:04X} Value={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            self.reg.a
-        );
         self.bus.write_byte(addr, self.reg.a);
     }
 
@@ -2973,22 +2886,17 @@ impl Cpu {
             self.enable_ime_next = false;
         }
 
-        let ie = self.bus.read_byte(0xFFFF);
-        let iflag = self.bus.read_byte(0xFF0F);
-
         if self.halted {
-            if (ie & iflag) != 0 {
+            let ie = self.bus.read_byte(0xFFFF);
+            let iflag = self.bus.read_byte(0xFF0F);
+            let pending = ie & iflag;
+
+            if pending != 0 {
                 self.halted = false;
-                if !self.ime {
-                    // HALT bug: execute one instruction without incrementing PC
-                    self.halt_bug = true;
-                    let opcode = self.bus.read_byte(self.reg.pc);
-                    self.decode_execute_opcode(opcode);
-                    self.halt_bug = false;
-                    // Don't increment PC for HALT bug
+                let push_return = self.ime;
+                if self.handle_interrupts(push_return) {
                     return;
                 }
-                // If IME is true, continue to handle the interrupt below
             } else {
                 // No interrupts pending, stay halted
                 return;
@@ -3011,7 +2919,7 @@ impl Cpu {
             return;
         }
 
-        if self.handle_interrupts() {
+        if self.ime && self.handle_interrupts(true) {
             // interrupt serviced, do not execute instructions this cycle
             return;
         }
@@ -3037,9 +2945,7 @@ impl Cpu {
 
     fn halt(&mut self) {
         self.m = 1;
-        if !self.halt_bug {
-            self.halted = true;
-        }
+        self.halted = true;
     }
 
     fn ld_a_b(&mut self) {
@@ -3085,6 +2991,7 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_correct_resetting_of_flags() {
