@@ -282,34 +282,18 @@ impl Bus {
                 self.ly = 0;
             }
 
+            if self.ly == 144 {
+                self.if_ |= 0x01;
+            }
+
             // STAT coincidence flag and interrupt
             if self.ly == self.lyc {
-                // Set coincidence flag in STAT register
                 self.stat |= 0x04;
-                // If LYC=LY interrupt source (bit 6) is set, request STAT interrupt
                 if self.stat & 0x40 != 0 {
-                    // Request STAT interrupt (bit 1 of IF)
                     self.if_ |= 0x02;
                 }
             } else {
-                // Clear coincidence flag
                 self.stat &= !0x04;
-            }
-        }
-
-        if self.ly == 144 {
-            // Request V-Blank interrupt (bit 0 of IF)
-            self.if_ |= 0x01;
-        }
-
-        // Force V-Blank interrupt periodically to prevent hanging
-        static mut VBLANK_COUNTER: u32 = 0;
-        unsafe {
-            VBLANK_COUNTER += cycles as u32;
-            if VBLANK_COUNTER >= 70224 {
-                // ~60Hz
-                self.if_ |= 0x01;
-                VBLANK_COUNTER = 0;
             }
         }
     }

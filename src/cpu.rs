@@ -2887,20 +2887,26 @@ impl Cpu {
         }
 
         if self.halted {
+            self.m = 1;
+            self.bus.update_ly(self.m);
+            self.bus.timer.update(self.m);
+
+            if self.bus.timer.interrupt {
+                self.bus.if_ |= 0x04;
+                self.bus.timer.interrupt = false;
+            }
+
             let ie = self.bus.read_byte(0xFFFF);
             let iflag = self.bus.read_byte(0xFF0F);
             let pending = ie & iflag;
 
             if pending != 0 {
                 self.halted = false;
-                let push_return = self.ime;
-                if self.handle_interrupts(push_return) {
-                    return;
+                if self.ime {
+                    self.handle_interrupts(true);
                 }
-            } else {
-                // No interrupts pending, stay halted
-                return;
             }
+            return;
         }
 
         if self.stopped {

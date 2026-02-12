@@ -32,10 +32,11 @@ impl Serial {
             }
             0xFF02 => {
                 self.control = value;
-                if value == 0x81 {
+                if value & 0x81 == 0x81 {
                     let c = self.data as char;
                     print!("{c}");
                     std::io::stdout().flush().unwrap();
+                    self.control &= !0x80;
                 }
             }
             _ => panic!("Serial write error at address: {addr}"),

@@ -26,7 +26,7 @@ pub struct Timer {
 
     // enable interrupt
     pub interrupt: bool,
-    tima_reload_delay: Option<u8>,
+    tima_reload_delay: Option<u16>,
 }
 
 impl Timer {
@@ -56,32 +56,38 @@ impl Timer {
         }
     }
 
-    pub fn update(&mut self, opcode_cycles: u8) {
-        let old_div_counter = self.div_counter;
-        self.div_counter = self.div_counter.wrapping_add(opcode_cycles as u16);
-        self.div = (self.div_counter >> 8) as u8;
+    pub fn update(&mut self, m_cycles: u8) {
+        // Step 4 T-cycles at a time (1 M-cycle) to avoid missing falling
+        // edges on the fastest timer frequency (bit 3, period 16 T-cycles).
+        // Bulk-adding all T-cycles at once can jump over an entire bit period,
+        // causing the edge detection to see no change.
+        for _ in 0..m_cycles {
+            let old_div_counter = self.div_counter;
+            self.div_counter = self.div_counter.wrapping_add(4);
+            self.div = (self.div_counter >> 8) as u8;
 
-        let bit = self.get_div_bit(self.tac);
-        let old_bit = ((old_div_counter >> bit) & 1) != 0;
-        let new_bit = ((self.div_counter >> bit) & 1) != 0;
-        let timer_enabled = self.timer_enabled();
+            let bit = self.get_div_bit(self.tac);
+            let old_bit = ((old_div_counter >> bit) & 1) != 0;
+            let new_bit = ((self.div_counter >> bit) & 1) != 0;
+            let timer_enabled = self.timer_enabled();
 
-        if timer_enabled && old_bit && !new_bit {
-            if self.tima == 0xFF {
-                self.tima = 0;
-                self.tima_reload_delay = Some(4);
-            } else {
-                self.tima = self.tima.wrapping_add(1);
+            if timer_enabled && old_bit && !new_bit {
+                if self.tima == 0xFF {
+                    self.tima = 0;
+                    self.tima_reload_delay = Some(4);
+                } else {
+                    self.tima = self.tima.wrapping_add(1);
+                }
             }
-        }
 
-        if let Some(ref mut delay) = self.tima_reload_delay {
-            let dec = min(*delay, opcode_cycles);
-            *delay -= dec;
-            if *delay == 0 {
-                self.tima = self.tma;
-                self.interrupt = true;
-                self.tima_reload_delay = None;
+            if let Some(ref mut delay) = self.tima_reload_delay {
+                let dec = min(*delay, 4);
+                *delay -= dec;
+                if *delay == 0 {
+                    self.tima = self.tma;
+                    self.interrupt = true;
+                    self.tima_reload_delay = None;
+                }
             }
         }
     }
