@@ -2845,7 +2845,7 @@ impl Cpu {
         }
     }
 
-    pub fn run_cycle(&mut self) {
+    pub fn run_cycle(&mut self) -> u8 {
         // handle delayed EI
         if self.enable_ime_next {
             self.ime = true;
@@ -2872,7 +2872,7 @@ impl Cpu {
                     self.handle_interrupts(true);
                 }
             }
-            return;
+            return self.m;
         }
 
         if self.stopped {
@@ -2888,12 +2888,12 @@ impl Cpu {
                     STOP_CYCLES = 0;
                 }
             }
-            return;
+            return self.m;
         }
 
         if self.ime && self.handle_interrupts(true) {
             // interrupt serviced, do not execute instructions this cycle
-            return;
+            return self.m;
         }
 
         if !self.halted {
@@ -2911,6 +2911,7 @@ impl Cpu {
                 self.bus.if_ |= 0x08;
             }
         }
+        self.m
     }
 
     fn halt(&mut self) {

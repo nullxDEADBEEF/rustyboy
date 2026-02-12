@@ -237,8 +237,8 @@ impl Bus {
             0xFF46 => {
                 let source_addr = (value as u16) << 8;
                 for i in 0..160 {
-                    let byte = self.read_byte(source_addr + 1);
-                    self.oam[i] = byte;
+                    let byte = self.read_byte(source_addr + i);
+                    self.oam[i as usize] = byte;
                 }
             }
             // BG Palette Data

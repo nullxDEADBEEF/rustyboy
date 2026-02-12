@@ -23,14 +23,14 @@ impl Gameboy {
             .unwrap_or_else(|e| panic!("{}", e));
         let buffer = vec![125; WIDTH * HEIGHT];
 
-        window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
 
         while window.is_open() && !window.is_key_down(Key::Escape) {
+            let cycles_per_frame = 17556; // ~4.19 MHz / 60 FPS
+            let mut cycles_run = 0;
+            while cycles_run < cycles_per_frame {
+                cycles_run += self.cpu.run_cycle() as u32;
+            }
             window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
-        }
-
-        loop {
-            self.cpu.run_cycle();
         }
     }
 }
