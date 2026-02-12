@@ -4,8 +4,8 @@ use minifb::{Key, Window, WindowOptions};
 
 use crate::cpu::Cpu;
 
-const WIDTH: usize = 800;
-const HEIGHT: usize = 600;
+const WIDTH: usize = 160;
+const HEIGHT: usize = 144;
 
 pub struct Gameboy {
     pub cpu: Cpu,
@@ -19,7 +19,12 @@ impl Gameboy {
     }
 
     pub fn run(&mut self) {
-        let mut window = Window::new("Rustyboy", WIDTH, HEIGHT, WindowOptions::default())
+        let window_options= WindowOptions {
+            scale: minifb::Scale::X2,
+            resize: true,
+            ..WindowOptions::default()
+        };
+        let mut window = Window::new("Rustyboy", WIDTH, HEIGHT, window_options)
             .unwrap_or_else(|e| panic!("{}", e));
         let buffer = vec![125; WIDTH * HEIGHT];
 
