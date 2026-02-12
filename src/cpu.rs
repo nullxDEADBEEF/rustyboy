@@ -551,11 +551,6 @@ impl Cpu {
         let a = self.reg.a;
         self.bus.write_byte(self.reg.get_de(), a);
 
-        if a != self.reg.a {
-            loop {
-                println!("NOT EQQQUAL");
-            }
-        }
     }
 
     // increment contents of register pair DE by 1
@@ -861,14 +856,7 @@ impl Cpu {
     fn ld_sp(&mut self) {
         self.m = 3;
 
-        let new_sp = self.read_word();
-        // Ensure SP is within valid RAM range (0xC000-0xDFFF or 0xFF80-0xFFFE)
-        if (0xC000..=0xDFFF).contains(&new_sp) || (0xFF80..=0xFFFE).contains(&new_sp) {
-            self.reg.sp = new_sp;
-        } else {
-            // If immediate value is invalid, set SP to a safe default
-            self.reg.sp = 0xDFFF;
-        }
+        self.reg.sp = self.read_word();
     }
 
     // store contents of register A in memory location specified by register pair HL
@@ -893,13 +881,6 @@ impl Cpu {
         let addr = self.reg.get_hl();
         let orig = self.bus.read_byte(addr);
         let value = orig.wrapping_add(1);
-        println!(
-            "CPU: PC={:04X} INC (HL) HL={:04X} Orig={:02X} New={:02X}",
-            self.reg.pc.wrapping_sub(1),
-            addr,
-            orig,
-            value
-        );
         self.unset_flag(Flags::Negative);
         self.set_flag_on_if(Flags::Zero, value == 0);
         self.set_flag_on_if(Flags::HalfCarry, (orig & 0xF) + 1 > 0xF);
@@ -2195,14 +2176,7 @@ impl Cpu {
     fn add_sp(&mut self) {
         self.m = 4;
 
-        let new_sp = self.add16_imm(self.reg.sp);
-        // Ensure SP is within valid RAM range (0xC000-0xDFFF or 0xFF80-0xFFFE)
-        if (0xC000..=0xDFFF).contains(&new_sp) || (0xFF80..=0xFFFE).contains(&new_sp) {
-            self.reg.sp = new_sp;
-        } else {
-            // If result is invalid, set SP to a safe default
-            self.reg.sp = 0xDFFF;
-        }
+        self.reg.sp = self.add16_imm(self.reg.sp);
     }
 
     // load contents of register pair HL into the pc
@@ -2310,14 +2284,7 @@ impl Cpu {
     fn ld_sp_hl(&mut self) {
         self.m = 2;
 
-        let new_sp = self.reg.get_hl();
-        // Ensure SP is within valid RAM range (0xC000-0xDFFF or 0xFF80-0xFFFE)
-        if (0xC000..=0xDFFF).contains(&new_sp) || (0xFF80..=0xFFFE).contains(&new_sp) {
-            self.reg.sp = new_sp;
-        } else {
-            // If HL contains an invalid value, set SP to a safe default
-            self.reg.sp = 0xDFFF;
-        }
+        self.reg.sp = self.reg.get_hl();
     }
 
     // load contents of internal ram or register specified
@@ -2981,11 +2948,6 @@ impl Cpu {
     fn ld_a_hl(&mut self) {
         self.m = 2;
         let addr = self.reg.get_hl();
-        println!(
-            "CPU: PC={:04X} LD A, (HL) HL={:04X}",
-            self.reg.pc.wrapping_sub(1),
-            addr
-        );
         self.reg.a = self.bus.read_byte(addr);
     }
     fn ld_a_a(&mut self) {
