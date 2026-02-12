@@ -162,10 +162,7 @@ impl Bus {
                 stat
             }
             0xFF44 => {
-                0x90
-                //println!("LY READ: {}", self.ly);
-                // TODO: uncomment
-                //self.ly
+                self.ly
             }
             0xFF45 => self.lyc,
             // LCD Control Register

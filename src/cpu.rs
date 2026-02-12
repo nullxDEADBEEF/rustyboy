@@ -192,9 +192,12 @@ impl Cpu {
         self.set_flag_on_if(Flags::Zero, result == 0);
         self.set_flag_on_if(
             Flags::HalfCarry,
-            (self.reg.a & 0x0F) < ((value & 0x0F) + carry),
+            (self.reg.a & 0x0F) < (value & 0x0F) + carry,
         );
-        self.set_flag_on_if(Flags::Carry, self.reg.a < value + carry);
+        self.set_flag_on_if(
+            Flags::Carry,
+            (self.reg.a as u16) < (value as u16) + (carry as u16),
+        );
         self.reg.a = result;
     }
 
@@ -668,13 +671,6 @@ impl Cpu {
         self.unset_flag(Flags::Negative);
         self.unset_flag(Flags::HalfCarry);
         self.set_flag_on_if(Flags::Carry, new_carry != 0);
-
-        // TODO: uncomment or delete
-        //let carry = self.reg.a & 0x01 == 0x01;
-        //self.reg.a = (self.reg.a >> 1) | (if carry { 0x80 } else { 0 });
-        //self.unset_flag(Flags::Negative);
-        //self.unset_flag(Flags::HalfCarry);
-        //self.set_flag_on_if(Flags::Carry, carry);
     }
 
     // if z flag is 0, jump s8 steps from current address in pc
@@ -2111,7 +2107,10 @@ impl Cpu {
         self.set_flag(Flags::Negative);
         self.set_flag_on_if(Flags::Zero, result == 0);
         self.set_flag_on_if(Flags::HalfCarry, (self.reg.a & 0xF) < (value & 0xF) + carry);
-        self.set_flag_on_if(Flags::Carry, self.reg.a < value + carry);
+        self.set_flag_on_if(
+            Flags::Carry,
+            (self.reg.a as u16) < (value as u16) + (carry as u16),
+        );
         self.reg.a = result;
     }
 
@@ -2898,8 +2897,6 @@ impl Cpu {
         }
 
         if !self.halted {
-            //self.print_register_data();
-
             self.decode_execute();
 
             self.bus.update_ly(self.m);

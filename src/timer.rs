@@ -7,8 +7,6 @@ use std::cmp::min;
 // should only increment timer if timer is enabled in TAC register
 // NOTE: we are doing machine cycles and not clock cycles
 
-// TODO: check if timer bit is active or not in tac
-
 pub struct Timer {
     // divider register
     // used to update sweep(channel 1), fade in/out
