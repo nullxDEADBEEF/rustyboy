@@ -49,6 +49,7 @@ pub struct Bus {
     lyc: u8,     // 0xFF45
     ie: u8,      // 0xFFFF - Interrupt Enable
     pub if_: u8, // 0xFF0F - Interrupt Flag
+    pub framebuffer: Vec<u32>,
 }
 
 impl Bus {
@@ -67,6 +68,7 @@ impl Bus {
             lyc: 0x00,
             ie: 0x00,
             if_: 0x00,
+            framebuffer: vec![0x00FFFFFFu32; 160 * 144],
         };
 
         bus.rom.load(rom_file).unwrap();
