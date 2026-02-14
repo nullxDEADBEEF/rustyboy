@@ -26,8 +26,6 @@ impl Gameboy {
         };
         let mut window = Window::new("Rustyboy", WIDTH, HEIGHT, window_options)
             .unwrap_or_else(|e| panic!("{}", e));
-        let buffer = vec![125; WIDTH * HEIGHT];
-
 
         while window.is_open() && !window.is_key_down(Key::Escape) {
             let cycles_per_frame = 17556; // ~4.19 MHz / 60 FPS
@@ -35,7 +33,7 @@ impl Gameboy {
             while cycles_run < cycles_per_frame {
                 cycles_run += self.cpu.run_cycle() as u32;
             }
-            window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
+            window.update_with_buffer(&self.cpu.bus.frame_buffer, WIDTH, HEIGHT).unwrap();
         }
     }
 }

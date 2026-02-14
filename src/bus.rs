@@ -34,6 +34,7 @@ pub struct Bus {
     pub timer: Timer,
     pub ppu: PPU,
     rom: Cartridge,
+    pub frame_buffer: Vec<u32>,
     serial: Serial,
     // internal ram
     working_ram: Vec<u8>,
@@ -48,6 +49,7 @@ impl Bus {
             timer: Timer::new(),
             serial: Serial::new(),
             rom: Cartridge::new(),
+            frame_buffer: vec![0x00FFFFFFu32; 160 * 144],
             ppu: PPU::new(),
             working_ram: vec![0xFF; WRAM_SIZE as usize + 1],
             high_ram: vec![0xFF; HRAM_SIZE as usize + 1],
