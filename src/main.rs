@@ -5,6 +5,7 @@ mod gameboy;
 mod register;
 mod serial;
 mod timer;
+mod ppu;
 
 use std::{env, path::Path};
 

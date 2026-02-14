@@ -20,7 +20,6 @@ pub struct Cpu {
     ime: bool,
     enable_ime_next: bool,
     stopped: bool,
-    halt_bug: bool,
 }
 
 impl Cpu {
@@ -33,7 +32,6 @@ impl Cpu {
             ime: false, // IME should start disabled
             enable_ime_next: false,
             stopped: false,
-            halt_bug: false,
         }
     }
 
@@ -2854,7 +2852,7 @@ impl Cpu {
 
         if self.halted {
             self.m = 1;
-            self.bus.update_ly(self.m);
+            self.bus.if_ = self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
 
             if self.bus.timer.interrupt {
@@ -2898,8 +2896,9 @@ impl Cpu {
 
         if !self.halted {
             self.decode_execute();
+            //self.print_register_data();
 
-            self.bus.update_ly(self.m);
+            self.bus.if_ = self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
 
             if self.bus.timer.interrupt {
@@ -2950,7 +2949,6 @@ impl Cpu {
     }
     fn ld_a_a(&mut self) {
         self.m = 1;
-        //self.reg.a = self.reg.a;
     }
 }
 
