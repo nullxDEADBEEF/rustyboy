@@ -46,7 +46,7 @@ impl Cartridge {
             0x01..=0x03 => MBCType::MBC1,
             _ => MBCType::RomOnly,
         };
-        //println!("{:?} loaded.", path);
+        println!("{:?} loaded.", path);
         self.get_title();
         self.get_cartridge_type();
         self.get_rom_size();

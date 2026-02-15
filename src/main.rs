@@ -2,6 +2,7 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod gameboy;
+mod ppu;
 mod register;
 mod serial;
 mod timer;
