@@ -1,3 +1,5 @@
+use std::path::StripPrefixError;
+
 pub const VRAM_SIZE: u16 = 0x1FFF;
 
 const VBLANK: u8 = 1;
@@ -191,31 +193,31 @@ impl PPU {
 
             if self.lcdc & 0x80 == 0 {
                 // LCD is off, fill with white
-                self.frame_buffer[self.ly as usize * 160 + x as usize] = 0xFFFFFFFF;
+                self.frame_buffer[self.ly as usize * window_width + x as usize] = 0xFFFFFFFF;
                 continue;
             }
 
             if self.lcdc & 0x01 == 0 {
                 // Background display is disabled, fill with white
-                self.frame_buffer[self.ly as usize * 160 + x as usize] = 0xFFFFFFFF;
+                self.frame_buffer[self.ly as usize * window_width + x as usize] = 0xFFFFFFFF;
                 continue;
             }
 
-            let tile_map_offset = if self.lcdc & 0x08 != 0 {
+            let tile_index = if self.lcdc & 0x08 != 0 {
                 0x9C00 + (tile_y * 32 + tile_x) as u16
             } else {
                 0x9800 + (tile_y * 32 + tile_x) as u16
             };
 
-            let tile_index = self.video_ram[tile_map_offset as usize - 0x8000];
+            let tile_data = self.video_ram[tile_index as usize - 0x8000];
 
-            let tile_data = bg_map_y % 8;
+            let pixel_row = bg_map_y % 8;
             let tile_addr = if self.lcdc & 0x10 != 0 {
-                0x8000 + (tile_index as u16) * 16 + tile_data * 2
+                0x8000 + (tile_data as u16) * 16 + pixel_row * 2
             } else {
                 (0x9000u16)
-                    .wrapping_add(((tile_index as i8 as i16) * 16) as u16)
-                    .wrapping_add(tile_data * 2)
+                    .wrapping_add(((tile_data as i8 as i16) * 16) as u16)
+                    .wrapping_add(pixel_row * 2)
             };
 
             let byte_low = self.video_ram[tile_addr as usize - 0x8000];
@@ -240,35 +242,35 @@ impl PPU {
                 _ => unreachable!(),
             };
 
-            self.frame_buffer[self.ly as usize * 160 + x as usize] =
+            self.frame_buffer[self.ly as usize * window_width + x as usize] =
                 0xFF000000 | pixel_color << 16 | pixel_color << 8 | pixel_color;
 
             
-            let should_draw_at_position = self.lcdc & 0x20 != 0 && self.ly >= self.wy && x >= self.wx.saturating_sub(7);
+            let should_draw_at_position = self.lcdc & 0x20 != 0 && self.ly >= self.wy && x >= self.wx.saturating_sub(7) as usize;
             if should_draw_at_position {
                 window_drawn = true;
 
-                let win_x: u16 = (x - (self.wx.saturating_sub(7))) as u16;
+                let win_x: u16 = (x - (self.wx.saturating_sub(7) as usize)) as u16;
                 let win_y: u16 = self.window_line_counter as u16;
 
                 let tile_x = win_x / 8;
                 let tile_y = win_y / 8;
 
-                let tile_map_offset = if self.lcdc & 0x40 != 0 {
+                let tile_index = if self.lcdc & 0x40 != 0 {
                     0x9C00 + (tile_y * 32 + tile_x) as u16
                 } else {
                     0x9800 + (tile_y * 32 + tile_x) as u16
                 };
 
-                let tile_index = self.video_ram[tile_map_offset as usize - 0x8000];
+                let tile_data = self.video_ram[tile_index as usize - 0x8000];
 
-                let tile_data = win_y % 8;
+                let pixel_row = win_y % 8;
                 let tile_addr = if self.lcdc & 0x10 != 0 {
-                    0x8000 + (tile_index as u16) * 16 + tile_data * 2
+                    0x8000 + (tile_data as u16) * 16 + pixel_row * 2
                 } else {
                     (0x9000u16)
-                        .wrapping_add(((tile_index as i8 as i16) * 16) as u16)
-                        .wrapping_add(tile_data * 2)
+                        .wrapping_add(((tile_data as i8 as i16) * 16) as u16)
+                        .wrapping_add(pixel_row * 2)
                 };
 
                 let byte_low = self.video_ram[tile_addr as usize - 0x8000];
@@ -293,10 +295,17 @@ impl PPU {
                     _ => unreachable!(),
                 };
 
-                self.frame_buffer[self.ly as usize * 160 + x as usize] =
+                self.frame_buffer[self.ly as usize * window_width + x as usize] =
                     0xFF000000 | pixel_color << 16 | pixel_color << 8 | pixel_color;
 
             }
+
+            self.scanline_sprites.iter().for_each(|&sprite| {
+                let sprite_x = self.oam[sprite * 4 + 1] as i16 - 8;
+                let sprite_y = self.oam[sprite * 4] as i16 - 16;
+
+                
+            });
         }
 
         if window_drawn {
