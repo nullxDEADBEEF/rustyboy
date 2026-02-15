@@ -1,5 +1,3 @@
-use std::path::StripPrefixError;
-
 pub const VRAM_SIZE: u16 = 0x1FFF;
 
 const VBLANK: u8 = 1;
@@ -64,17 +62,17 @@ impl PPU {
                     return 0xFF;
                 }
                 self.video_ram[(addr - 0x8000) as usize]
-            },
+            }
             0xFE00..=0xFE9F => {
-                if self.mode == OAM_SCAN || self.mode == PIXEL_TRANSFER && self.lcdc & 0x80 != 0 {
+                if (self.mode == OAM_SCAN || self.mode == PIXEL_TRANSFER) && self.lcdc & 0x80 != 0 {
                     return 0xFF;
                 }
-                
+
                 self.oam[(addr - 0xFE00) as usize]
             }
-            
+
             0xFF40 => self.lcdc,
-            0xFF41 => self.stat | self.mode,
+            0xFF41 => 0x80 | self.stat | self.mode,
             0xFF42 => self.scy,
             0xFF43 => self.scx,
             0xFF44 => self.ly,
@@ -96,9 +94,9 @@ impl PPU {
                 }
                 self.video_ram[(addr - 0x8000) as usize] = value;
             }
-            
-            0xFE00..=0xFE9F =>{
-                if self.mode == OAM_SCAN || self.mode == PIXEL_TRANSFER && self.lcdc & 0x80 != 0 {
+
+            0xFE00..=0xFE9F => {
+                if (self.mode == OAM_SCAN || self.mode == PIXEL_TRANSFER) && self.lcdc & 0x80 != 0 {
                     return;
                 }
                 self.oam[(addr - 0xFE00) as usize] = value;
@@ -109,8 +107,8 @@ impl PPU {
             0xFF43 => self.scx = value,
             0xFF45 => self.lyc = value,
             0xFF47 => self.bgp = value,
-            0xFF48 => self.obp0 = value & 0xFC, // lower 2 bits are ignored
-            0xFF49 => self.obp1 = value & 0xFC, // lower 2 bits are ignored
+            0xFF48 => self.obp0 = value, // lower 2 bits are ignored
+            0xFF49 => self.obp1 = value, // lower 2 bits are ignored
             0xFF4A => self.wy = value,
             0xFF4B => self.wx = value,
             _ => panic!("PPU write error at address: {:#04X}", addr),
@@ -147,7 +145,7 @@ impl PPU {
             }
         };
 
-        self.ly_cycles += cycles as u16;
+        self.ly_cycles += (cycles as u16);
         while self.ly_cycles >= 456 {
             self.ly_cycles -= 456;
             if self.ly < 144 {
@@ -179,6 +177,14 @@ impl PPU {
 
     pub fn render_scanline(&mut self) {
         let window_width = 160;
+
+        if self.lcdc & 0x80 == 0 {
+            self.ly = 0;
+            self.ly_cycles = 0;
+            self.mode = 0;
+            self.stat &= !0x04; // clear coincidence flag
+            return;
+        }
 
         let mut window_drawn = false;
 
@@ -245,8 +251,9 @@ impl PPU {
             self.frame_buffer[self.ly as usize * window_width + x as usize] =
                 0xFF000000 | pixel_color << 16 | pixel_color << 8 | pixel_color;
 
-            
-            let should_draw_at_position = self.lcdc & 0x20 != 0 && self.ly >= self.wy && x >= self.wx.saturating_sub(7) as usize;
+            let should_draw_at_position = self.lcdc & 0x20 != 0
+                && self.ly >= self.wy
+                && x >= self.wx.saturating_sub(7) as usize;
             if should_draw_at_position {
                 window_drawn = true;
 
@@ -297,14 +304,12 @@ impl PPU {
 
                 self.frame_buffer[self.ly as usize * window_width + x as usize] =
                     0xFF000000 | pixel_color << 16 | pixel_color << 8 | pixel_color;
-
             }
 
             self.scanline_sprites.iter().for_each(|&sprite| {
                 let sprite_x = self.oam[sprite * 4 + 1] as i16 - 8;
                 let sprite_y = self.oam[sprite * 4] as i16 - 16;
 
-                
             });
         }
 
