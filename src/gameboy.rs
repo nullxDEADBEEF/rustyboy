@@ -19,7 +19,7 @@ impl Gameboy {
     }
 
     pub fn run(&mut self) {
-        let window_options= WindowOptions {
+        let window_options = WindowOptions {
             scale: minifb::Scale::X2,
             resize: true,
             ..WindowOptions::default()
@@ -33,7 +33,9 @@ impl Gameboy {
             while cycles_run < cycles_per_frame {
                 cycles_run += self.cpu.run_cycle() as u32;
             }
-            window.update_with_buffer(&self.cpu.bus.frame_buffer, WIDTH, HEIGHT).unwrap();
+            window
+                .update_with_buffer(&self.cpu.bus.ppu.frame_buffer, WIDTH, HEIGHT)
+                .unwrap();
         }
     }
 }

@@ -2,10 +2,10 @@ mod bus;
 mod cartridge;
 mod cpu;
 mod gameboy;
+mod ppu;
 mod register;
 mod serial;
 mod timer;
-mod ppu;
 
 use std::{env, path::Path};
 

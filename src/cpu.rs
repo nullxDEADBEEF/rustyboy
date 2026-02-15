@@ -551,7 +551,6 @@ impl Cpu {
 
         let a = self.reg.a;
         self.bus.write_byte(self.reg.get_de(), a);
-
     }
 
     // increment contents of register pair DE by 1
@@ -2852,7 +2851,7 @@ impl Cpu {
 
         if self.halted {
             self.m = 1;
-            self.bus.if_ = self.bus.ppu.update_ly(self.m);
+            self.bus.if_ |= self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
 
             if self.bus.timer.interrupt {
@@ -2898,7 +2897,7 @@ impl Cpu {
             self.decode_execute();
             //self.print_register_data();
 
-            self.bus.if_ = self.bus.ppu.update_ly(self.m);
+            self.bus.if_ |= self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
 
             if self.bus.timer.interrupt {

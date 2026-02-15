@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::{cartridge::Cartridge, ppu::{self, PPU}, serial::Serial, timer::Timer};
+use crate::{cartridge::Cartridge, ppu::PPU, serial::Serial, timer::Timer};
 
 // NOTE: "word" in this context means 16-bit
 
@@ -34,7 +34,6 @@ pub struct Bus {
     pub timer: Timer,
     pub ppu: PPU,
     rom: Cartridge,
-    pub frame_buffer: Vec<u32>,
     serial: Serial,
     // internal ram
     working_ram: Vec<u8>,
@@ -49,7 +48,6 @@ impl Bus {
             timer: Timer::new(),
             serial: Serial::new(),
             rom: Cartridge::new(),
-            frame_buffer: vec![0x00FFFFFFu32; 160 * 144],
             ppu: PPU::new(),
             working_ram: vec![0xFF; WRAM_SIZE as usize + 1],
             high_ram: vec![0xFF; HRAM_SIZE as usize + 1],
@@ -127,7 +125,7 @@ impl Bus {
             // high ram (HRAM)
             HRAM_START..=HRAM_END => self.high_ram[addr as usize & HRAM_SIZE as usize],
             INTERRUPT_ENABLE => self.ie & 0x1F,
-            0xFF41..=0xFF4B => self.ppu.read_byte(addr),
+            0xFF40..=0xFF4B => self.ppu.read_byte(addr),
             _ => {
                 // For now, return 0 for unhandled registers
                 // This prevents the debug spam and allows the test to continue
@@ -167,15 +165,8 @@ impl Bus {
             SERIAL_START..=SERIAL_END => self.serial.write_byte(addr, value),
             TIMER_START..=TIMER_END => self.timer.write_byte(addr, value),
             INTERRUPT_FLAG => self.if_ = value & 0x1F,
-            SOUND_START..=SOUND_END => {},
-            0xFF41 => self.ppu.write_byte(addr, value),
-            0xFF45 => self.ppu.write_byte(addr, value),
-            // LCD Control Register
-            0xFF40 => self.ppu.write_byte(addr, value),
-            // LCD Scroll Y
-            0xFF42 => {}
-            // LCD Scroll X
-            0xFF43 => {}
+            SOUND_START..=SOUND_END => {}
+            0xFF40..=0xFF43 | 0xFF45 => self.ppu.write_byte(addr, value),
             // DMA Transfer and Start Address
             0xFF46 => {
                 let source_addr = (value as u16) << 8;
@@ -184,16 +175,7 @@ impl Bus {
                     self.ppu.oam[i as usize] = byte;
                 }
             }
-            // BG Palette Data
-            0xFF47 => {}
-            // Object Palette 0 Data
-            0xFF48 => {}
-            // Object Palette 1 Data
-            0xFF49 => {}
-            // Window Y Position
-            0xFF4A => {}
-            // Window X Position minus 7
-            0xFF4B => {}
+            0xFF47..=0xFF4B => self.ppu.write_byte(addr, value),
             // high ram (HRAM)
             HRAM_START..=HRAM_END => self.high_ram[addr as usize & HRAM_SIZE as usize] = value,
             // interrupt enable register (IE)
@@ -204,7 +186,7 @@ impl Bus {
         }
     }
 
-    pub fn read_word(&self, addr: u16) -> u16 {
+    pub fn read_word(&mut self, addr: u16) -> u16 {
         (self.read_byte(addr) as u16) | ((self.read_byte(addr + 1) as u16) << 8)
     }
 
