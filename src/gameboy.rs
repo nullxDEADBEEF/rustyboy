@@ -20,7 +20,7 @@ impl Gameboy {
 
     pub fn run(&mut self) {
         let window_options = WindowOptions {
-            scale: minifb::Scale::X2,
+            scale: minifb::Scale::X8,
             resize: true,
             ..WindowOptions::default()
         };

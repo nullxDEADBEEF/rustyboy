@@ -118,7 +118,17 @@ impl PPU {
     pub fn update_ly(&mut self, cycles: u8) -> u8 {
         let mut bitmask: u8 = 0;
 
+        self.ly_cycles += cycles as u16;
+
         let mode_before = self.mode;
+
+        if self.lcdc & 0x80 == 0 {
+            self.ly = 0;
+            self.ly_cycles = 0;
+            self.mode = 0;
+            self.stat &= !0x04; // clear coincidence flag
+            return bitmask;
+        }
 
         if self.ly >= 144 {
             self.mode = VBLANK;
@@ -145,7 +155,6 @@ impl PPU {
             }
         };
 
-        self.ly_cycles += (cycles as u16);
         while self.ly_cycles >= 456 {
             self.ly_cycles -= 456;
             if self.ly < 144 {
@@ -175,18 +184,52 @@ impl PPU {
         bitmask
     }
 
+    fn get_tile_color_id(&self, map_x: u16, map_y: u16, use_high_tile_map: bool) -> u8 {
+        let tile_x = map_x / 8;
+        let tile_y = map_y / 8;
+
+        let tile_index = if use_high_tile_map {
+            0x9C00 + (tile_y * 32 + tile_x) as u16
+        } else {
+            0x9800 + (tile_y * 32 + tile_x) as u16
+        };
+
+        let tile_data = self.video_ram[tile_index as usize - 0x8000];
+
+        let pixel_row = map_y % 8;
+        let tile_addr = if self.lcdc & 0x10 != 0 {
+            0x8000 + (tile_data as u16) * 16 + pixel_row * 2
+        } else {
+            (0x9000u16)
+                .wrapping_add(((tile_data as i8 as i16) * 16) as u16)
+                .wrapping_add(pixel_row * 2)
+        };
+
+        let byte_low = self.video_ram[tile_addr as usize - 0x8000];
+        let byte_high = self.video_ram[(tile_addr + 1) as usize - 0x8000];
+
+        let bit_index = 7 - (map_x % 8);
+        ((byte_high >> bit_index) & 1) << 1 | ((byte_low >> bit_index) & 1)
+    }
+
+    fn apply_palette(palette: u8, color_id: u8) -> u32 {
+        let shade = (palette >> (color_id * 2)) & 0x03;
+        let pixel_color = match shade {
+            0 => 255u32, // White
+            1 => 170,    // Light gray
+            2 => 85,     // Dark gray
+            3 => 0,      // Black
+            _ => unreachable!(),
+        };
+        0xFF000000 | pixel_color << 16 | pixel_color << 8 | pixel_color
+    }
+
     pub fn render_scanline(&mut self) {
         let window_width = 160;
 
-        if self.lcdc & 0x80 == 0 {
-            self.ly = 0;
-            self.ly_cycles = 0;
-            self.mode = 0;
-            self.stat &= !0x04; // clear coincidence flag
-            return;
-        }
 
         let mut window_drawn = false;
+        let mut bg_color_ids = [0u8; 160];
 
         self.oam_scan();
 
@@ -194,62 +237,16 @@ impl PPU {
             let bg_map_y: u16 = (self.scy as u16 + self.ly as u16) % 256;
             let bg_map_x: u16 = (self.scx as u16 + x as u16) % 256;
 
-            let tile_x = bg_map_x / 8;
-            let tile_y = bg_map_y / 8;
-
-            if self.lcdc & 0x80 == 0 {
-                // LCD is off, fill with white
-                self.frame_buffer[self.ly as usize * window_width + x as usize] = 0xFFFFFFFF;
-                continue;
-            }
-
             if self.lcdc & 0x01 == 0 {
                 // Background display is disabled, fill with white
                 self.frame_buffer[self.ly as usize * window_width + x as usize] = 0xFFFFFFFF;
                 continue;
             }
 
-            let tile_index = if self.lcdc & 0x08 != 0 {
-                0x9C00 + (tile_y * 32 + tile_x) as u16
-            } else {
-                0x9800 + (tile_y * 32 + tile_x) as u16
-            };
-
-            let tile_data = self.video_ram[tile_index as usize - 0x8000];
-
-            let pixel_row = bg_map_y % 8;
-            let tile_addr = if self.lcdc & 0x10 != 0 {
-                0x8000 + (tile_data as u16) * 16 + pixel_row * 2
-            } else {
-                (0x9000u16)
-                    .wrapping_add(((tile_data as i8 as i16) * 16) as u16)
-                    .wrapping_add(pixel_row * 2)
-            };
-
-            let byte_low = self.video_ram[tile_addr as usize - 0x8000];
-            let byte_high = self.video_ram[(tile_addr + 1) as usize - 0x8000];
-
-            let bit_index = 7 - (bg_map_x % 8);
-            let color_id = ((byte_high >> bit_index) & 1) << 1 | ((byte_low >> bit_index) & 1);
-
-            let shade = match color_id {
-                0 => (self.bgp & 0x03) as u32,
-                1 => ((self.bgp >> 2) & 0x03) as u32,
-                2 => ((self.bgp >> 4) & 0x03) as u32,
-                3 => ((self.bgp >> 6) & 0x03) as u32,
-                _ => unreachable!(),
-            };
-
-            let pixel_color = match shade {
-                0 => 255, // White
-                1 => 170, // Light gray
-                2 => 85,  // Dark gray
-                3 => 0,   // Black
-                _ => unreachable!(),
-            };
-
+            let color_id = self.get_tile_color_id(bg_map_x, bg_map_y, self.lcdc & 0x08 != 0);
             self.frame_buffer[self.ly as usize * window_width + x as usize] =
-                0xFF000000 | pixel_color << 16 | pixel_color << 8 | pixel_color;
+                Self::apply_palette(self.bgp, color_id);
+            bg_color_ids[x] = color_id;
 
             let should_draw_at_position = self.lcdc & 0x20 != 0
                 && self.ly >= self.wy
@@ -260,56 +257,65 @@ impl PPU {
                 let win_x: u16 = (x - (self.wx.saturating_sub(7) as usize)) as u16;
                 let win_y: u16 = self.window_line_counter as u16;
 
-                let tile_x = win_x / 8;
-                let tile_y = win_y / 8;
-
-                let tile_index = if self.lcdc & 0x40 != 0 {
-                    0x9C00 + (tile_y * 32 + tile_x) as u16
-                } else {
-                    0x9800 + (tile_y * 32 + tile_x) as u16
-                };
-
-                let tile_data = self.video_ram[tile_index as usize - 0x8000];
-
-                let pixel_row = win_y % 8;
-                let tile_addr = if self.lcdc & 0x10 != 0 {
-                    0x8000 + (tile_data as u16) * 16 + pixel_row * 2
-                } else {
-                    (0x9000u16)
-                        .wrapping_add(((tile_data as i8 as i16) * 16) as u16)
-                        .wrapping_add(pixel_row * 2)
-                };
-
-                let byte_low = self.video_ram[tile_addr as usize - 0x8000];
-                let byte_high = self.video_ram[(tile_addr + 1) as usize - 0x8000];
-
-                let bit_index = 7 - (win_x % 8);
-                let color_id = ((byte_high >> bit_index) & 1) << 1 | ((byte_low >> bit_index) & 1);
-
-                let shade = match color_id {
-                    0 => (self.bgp & 0x03) as u32,
-                    1 => ((self.bgp >> 2) & 0x03) as u32,
-                    2 => ((self.bgp >> 4) & 0x03) as u32,
-                    3 => ((self.bgp >> 6) & 0x03) as u32,
-                    _ => unreachable!(),
-                };
-
-                let pixel_color = match shade {
-                    0 => 255, // White
-                    1 => 170, // Light gray
-                    2 => 85,  // Dark gray
-                    3 => 0,   // Black
-                    _ => unreachable!(),
-                };
-
-                self.frame_buffer[self.ly as usize * window_width + x as usize] =
-                    0xFF000000 | pixel_color << 16 | pixel_color << 8 | pixel_color;
+                let color_id = self.get_tile_color_id(win_x, win_y, self.lcdc & 0x40 != 0);
+                bg_color_ids[x] = color_id;
+                self.frame_buffer[self.ly as usize * window_width + x] =
+                    Self::apply_palette(self.bgp, color_id);
             }
 
             self.scanline_sprites.iter().for_each(|&sprite| {
-                let sprite_x = self.oam[sprite * 4 + 1] as i16 - 8;
-                let sprite_y = self.oam[sprite * 4] as i16 - 16;
+                let sprite_x: i16 = self.oam[sprite * 4 + 1] as i16 - 8;
+                let sprite_y: i16 = self.oam[sprite * 4] as i16 - 16;
+                let sprite_tile: u8 = self.oam[sprite * 4 + 2];
+                let sprite_attr: u8 = self.oam[sprite * 4 + 3];
 
+                let sprite_height = if self.lcdc & 0x04 != 0 { 16 } else { 8 };
+
+                let pixel_column_within_span_of_sprite =
+                    x as i16 >= sprite_x && (x as i16) < sprite_x + 8;
+
+                if pixel_column_within_span_of_sprite {
+                    let tile_row = if sprite_attr & 0x40 != 0 {
+                        sprite_height - 1 - (self.ly as i16 - sprite_y)
+                    } else {
+                        self.ly as i16 - sprite_y
+                    } as u16;
+                    let tile = if sprite_height == 16 {
+                        if tile_row < 8 {
+                            sprite_tile & 0xFE
+                        } else {
+                            sprite_tile | 0x01
+                        }
+                    } else {
+                        sprite_tile
+                    };
+                    let row_in_tile = tile_row % 8;
+                    let tile_addr = 0x8000 + (tile as u16) * 16 + row_in_tile * 2;
+
+                    let byte_low = self.video_ram[tile_addr as usize - 0x8000];
+                    let byte_high = self.video_ram[(tile_addr + 1) as usize - 0x8000];
+                    let bit_index = if sprite_attr & 0x20 != 0 {
+                        (x as i16 - sprite_x) as u8
+                    } else {
+                        7 - (x as i16 - sprite_x) as u8
+                    };
+                    let color_id =
+                        ((byte_high >> bit_index) & 1) << 1 | ((byte_low >> bit_index) & 1);
+
+                    if color_id != 0 {
+                        if sprite_attr & 0x80 != 0 && bg_color_ids[x] != 0 {
+                            return;
+                        }
+
+                        let palette = if sprite_attr & 0x10 != 0 {
+                            self.obp1
+                        } else {
+                            self.obp0
+                        };
+                        self.frame_buffer[self.ly as usize * window_width + x] =
+                            Self::apply_palette(palette, color_id);
+                    }
+                }
             });
         }
 
