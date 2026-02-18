@@ -981,7 +981,7 @@ impl Cpu {
 
     fn ld_b_b(&mut self) {
         self.m = 1;
-        self.reg.b = self.reg.b;
+        // LD B, B — no-op
     }
     fn ld_b_c(&mut self) {
         self.m = 1;
@@ -1019,7 +1019,7 @@ impl Cpu {
     }
     fn ld_c_c(&mut self) {
         self.m = 1;
-        self.reg.c = self.reg.c;
+        // LD C, C — no-op
     }
     fn ld_c_d(&mut self) {
         self.m = 1;
@@ -1057,7 +1057,7 @@ impl Cpu {
     }
     fn ld_d_d(&mut self) {
         self.m = 1;
-        self.reg.d = self.reg.d;
+        // LD D, D — no-op
     }
     fn ld_d_e(&mut self) {
         self.m = 1;
@@ -1095,7 +1095,7 @@ impl Cpu {
     }
     fn ld_e_e(&mut self) {
         self.m = 1;
-        self.reg.e = self.reg.e;
+        // LD E, E — no-op
     }
     fn ld_e_h(&mut self) {
         self.m = 1;
@@ -1133,7 +1133,7 @@ impl Cpu {
     }
     fn ld_h_h(&mut self) {
         self.m = 1;
-        self.reg.h = self.reg.h;
+        // LD H, H — no-op
     }
     fn ld_h_l(&mut self) {
         self.m = 1;
@@ -1171,7 +1171,7 @@ impl Cpu {
     }
     fn ld_l_l(&mut self) {
         self.m = 1;
-        self.reg.l = self.reg.l;
+        // LD L, L — no-op
     }
     fn ld_l_hl(&mut self) {
         self.m = 2;
