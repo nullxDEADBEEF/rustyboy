@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::{cartridge::Cartridge, ppu::PPU, serial::Serial, timer::Timer};
+use crate::{cartridge::Cartridge, ppu::Ppu, serial::Serial, timer::Timer};
 
 // NOTE: "word" in this context means 16-bit
 
@@ -32,7 +32,7 @@ const HRAM_SIZE: u16 = 0x7F;
 // can be read from or written to by the CPU
 pub struct Bus {
     pub timer: Timer,
-    pub ppu: PPU,
+    pub ppu: Ppu,
     rom: Cartridge,
     serial: Serial,
     // internal ram
@@ -48,7 +48,7 @@ impl Bus {
             timer: Timer::new(),
             serial: Serial::new(),
             rom: Cartridge::new(),
-            ppu: PPU::new(),
+            ppu: Ppu::new(),
             working_ram: vec![0xFF; WRAM_SIZE as usize + 1],
             high_ram: vec![0xFF; HRAM_SIZE as usize + 1],
             ie: 0x00,

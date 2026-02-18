@@ -126,18 +126,15 @@ impl Cartridge {
                     }
                     _ => {}
                 }
-            },
+            }
             MBCType::MBC2 => {
-                match addr {
-                    0x0000..=0x3FFF => {
-                        self.rom_bank = value & 0x0F;
-                        if self.rom_bank == 0 {
-                            self.rom_bank = 1;
-                        }
+                if let 0x0000..=0x3FFF = addr {
+                    self.rom_bank = value & 0x0F;
+                    if self.rom_bank == 0 {
+                        self.rom_bank = 1;
                     }
-                    _ => {}
                 }
-            },
+            }
             MBCType::MBC3 => {
                 match addr {
                     0x0000..=0x1FFF => {

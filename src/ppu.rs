@@ -7,7 +7,7 @@ const PIXEL_TRANSFER: u8 = 3;
 
 const MAX_OAM_ENTRIES: usize = 40;
 
-pub struct PPU {
+pub struct Ppu {
     // stores graphic tiles
     pub video_ram: Vec<u8>,
     pub frame_buffer: Vec<u32>,
@@ -31,7 +31,7 @@ pub struct PPU {
     scanline_sprites: Vec<usize>,
 }
 
-impl PPU {
+impl Ppu {
     pub fn new() -> Self {
         Self {
             video_ram: vec![0xFF; VRAM_SIZE as usize + 1],
@@ -132,26 +132,20 @@ impl PPU {
 
         if self.ly >= 144 {
             self.mode = VBLANK;
-            if mode_before != self.mode {
-                if self.stat & 0x10 != 0 {
-                    bitmask |= 0x02;
-                }
+            if mode_before != self.mode && self.stat & 0x10 != 0 {
+                bitmask |= 0x02;
             }
         } else if self.ly_cycles < 80 {
             self.mode = OAM_SCAN; // OAM scan
-            if mode_before != self.mode {
-                if self.stat & 0x20 != 0 {
-                    bitmask |= 0x02;
-                }
+            if mode_before != self.mode && self.stat & 0x20 != 0 {
+                bitmask |= 0x02;
             }
         } else if self.ly_cycles < 252 {
             self.mode = PIXEL_TRANSFER; // Pixel transfer
         } else {
             self.mode = HBLANK; // HBlank
-            if mode_before != self.mode {
-                if self.stat & 0x08 != 0 {
-                    bitmask |= 0x02;
-                }
+            if mode_before != self.mode && self.stat & 0x08 != 0 {
+                bitmask |= 0x02;
             }
         };
 
@@ -189,9 +183,9 @@ impl PPU {
         let tile_y = map_y / 8;
 
         let tile_index = if use_high_tile_map {
-            0x9C00 + (tile_y * 32 + tile_x) as u16
+            0x9C00 + tile_y * 32 + tile_x
         } else {
-            0x9800 + (tile_y * 32 + tile_x) as u16
+            0x9800 + tile_y * 32 + tile_x
         };
 
         let tile_data = self.video_ram[tile_index as usize - 0x8000];
@@ -227,26 +221,25 @@ impl PPU {
     pub fn render_scanline(&mut self) {
         let window_width = 160;
 
-
         let mut window_drawn = false;
         let mut bg_color_ids = [0u8; 160];
 
         self.oam_scan();
 
-        for x in 0..window_width {
+        for (x, bg_color_id) in bg_color_ids.iter_mut().enumerate().take(window_width) {
             let bg_map_y: u16 = (self.scy as u16 + self.ly as u16) % 256;
             let bg_map_x: u16 = (self.scx as u16 + x as u16) % 256;
 
             if self.lcdc & 0x01 == 0 {
                 // Background display is disabled, fill with white
-                self.frame_buffer[self.ly as usize * window_width + x as usize] = 0xFFFFFFFF;
+                self.frame_buffer[self.ly as usize * window_width + x] = 0xFFFFFFFF;
                 continue;
             }
 
             let color_id = self.get_tile_color_id(bg_map_x, bg_map_y, self.lcdc & 0x08 != 0);
-            self.frame_buffer[self.ly as usize * window_width + x as usize] =
+            self.frame_buffer[self.ly as usize * window_width + x] =
                 Self::apply_palette(self.bgp, color_id);
-            bg_color_ids[x] = color_id;
+            *bg_color_id = color_id;
 
             let should_draw_at_position = self.lcdc & 0x20 != 0
                 && self.ly >= self.wy
@@ -258,7 +251,7 @@ impl PPU {
                 let win_y: u16 = self.window_line_counter as u16;
 
                 let color_id = self.get_tile_color_id(win_x, win_y, self.lcdc & 0x40 != 0);
-                bg_color_ids[x] = color_id;
+                *bg_color_id = color_id;
                 self.frame_buffer[self.ly as usize * window_width + x] =
                     Self::apply_palette(self.bgp, color_id);
             }
@@ -303,7 +296,7 @@ impl PPU {
                         ((byte_high >> bit_index) & 1) << 1 | ((byte_low >> bit_index) & 1);
 
                     if color_id != 0 {
-                        if sprite_attr & 0x80 != 0 && bg_color_ids[x] != 0 {
+                        if sprite_attr & 0x80 != 0 && *bg_color_id != 0 {
                             return;
                         }
 
