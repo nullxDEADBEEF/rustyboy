@@ -58,45 +58,6 @@ impl Bus {
         bus.rom.load(rom_file).unwrap();
         println!("{}", bus.rom);
 
-        // hardware registers - boot ROM values
-        //bus.write_byte(0xFF00, 0xCF); // Joypad
-        //bus.write_byte(0xFF01, 0x00); // Serial data
-        //bus.write_byte(0xFF02, 0x7E); // Serial control
-        //bus.write_byte(0xFF04, 0xAB); // DIV
-        //bus.write_byte(0xFF05, 0x00); // TIMA
-        //bus.write_byte(0xFF06, 0x00); // TMA
-        //bus.write_byte(0xFF07, 0xF8); // TAC
-        //bus.write_byte(0xFF0F, 0xE1); // IF - set some interrupts
-        //bus.write_byte(0xFF10, 0x80); // Sound
-        //bus.write_byte(0xFF11, 0xBF);
-        //bus.write_byte(0xFF12, 0xF3);
-        //bus.write_byte(0xFF14, 0xBF);
-        //bus.write_byte(0xFF16, 0x3F);
-        //bus.write_byte(0xFF17, 0x00);
-        //bus.write_byte(0xFF19, 0xBF);
-        //bus.write_byte(0xFF1A, 0x7F);
-        //bus.write_byte(0xFF1B, 0xFF);
-        //bus.write_byte(0xFF1C, 0x9F);
-        //bus.write_byte(0xFF1E, 0xFF);
-        //bus.write_byte(0xFF20, 0xFF);
-        //bus.write_byte(0xFF21, 0x00);
-        //bus.write_byte(0xFF22, 0x00);
-        //bus.write_byte(0xFF23, 0xBF);
-        //bus.write_byte(0xFF24, 0x77);
-        //bus.write_byte(0xFF25, 0xF3);
-        //bus.write_byte(0xFF26, 0xF1);
-        //bus.write_byte(0xFF40, 0x91); // LCD Control
-        //bus.write_byte(0xFF41, 0x85); // LCD Status
-        //bus.write_byte(0xFF42, 0x00); // Scroll Y
-        //bus.write_byte(0xFF43, 0x00); // Scroll X
-        //bus.write_byte(0xFF45, 0x00); // LYC
-        //bus.write_byte(0xFF47, 0xFC); // BG Palette
-        //bus.write_byte(0xFF48, 0xFF); // Object Palette 0
-        //bus.write_byte(0xFF49, 0xFF); // Object Palette 1
-        //bus.write_byte(0xFF4A, 0x00); // Window Y
-        //bus.write_byte(0xFF4B, 0x00); // Window X
-        //bus.write_byte(0xFFFF, 0x00); // IE - no interrupts enabled initially
-
         bus
     }
 
@@ -161,7 +122,7 @@ impl Bus {
             // prohibited area
             0xFEA0..=0xFEFF => {}
             // I/O registers
-            JOYPAD => {}
+            JOYPAD => {},
             SERIAL_START..=SERIAL_END => self.serial.write_byte(addr, value),
             TIMER_START..=TIMER_END => self.timer.write_byte(addr, value),
             INTERRUPT_FLAG => self.if_ = value & 0x1F,

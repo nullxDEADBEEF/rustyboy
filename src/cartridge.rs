@@ -20,7 +20,9 @@ pub struct Cartridge {
     mbc_type: MBCType,
     rom_bank: u8,
     ram_bank: u8,
+    ram_enabled: bool,
     banking_mode: u8, // 0 = ROM banking, 1 = RAM banking
+    external_ram: Vec<u8>,
 }
 
 impl Cartridge {
@@ -36,7 +38,9 @@ impl Cartridge {
             mbc_type: MBCType::RomOnly,
             rom_bank: 1,
             ram_bank: 0,
+            ram_enabled: false,
             banking_mode: 0,
+            external_ram: Vec::new(),
         }
     }
 
@@ -57,6 +61,19 @@ impl Cartridge {
         self.get_ram_size();
         self.get_version();
         self.calculate_and_check_checksum();
+
+        // allocate external RAM based on header
+        let ram_bytes = match self.data[0x0149] {
+            0x00 => 0,
+            0x01 => 0, // listed but unused
+            0x02 => 8 * 1024,      // 8 KB (1 bank)
+            0x03 => 32 * 1024,     // 32 KB (4 banks)
+            0x04 => 128 * 1024,    // 128 KB (16 banks)
+            0x05 => 64 * 1024,     // 64 KB (8 banks)
+            _ => 0,
+        };
+        self.external_ram = vec![0x00; ram_bytes];
+
         Ok(())
     }
 
@@ -70,6 +87,14 @@ impl Cartridge {
                     let bank = if bank == 0 { 1 } else { bank };
                     let offset = (bank as usize) * 0x4000 + (addr as usize - 0x4000);
                     self.data.get(offset).copied().unwrap_or(0xFF)
+                }
+                0xA000..=0xBFFF => {
+                    if !self.ram_enabled || self.external_ram.is_empty() {
+                        return 0xFF;
+                    }
+                    let bank = if self.banking_mode == 1 { self.ram_bank } else { 0 };
+                    let offset = (bank as usize) * 0x2000 + (addr as usize - 0xA000);
+                    self.external_ram.get(offset).copied().unwrap_or(0xFF)
                 }
                 _ => 0xFF,
             },
@@ -91,6 +116,17 @@ impl Cartridge {
                     let offset = (bank as usize) * 0x4000 + (addr as usize - 0x4000);
                     self.data.get(offset).copied().unwrap_or(0xFF)
                 }
+                0xA000..=0xBFFF => {
+                    if !self.ram_enabled || self.external_ram.is_empty() {
+                        return 0xFF;
+                    }
+                    if self.ram_bank <= 0x03 {
+                        let offset = (self.ram_bank as usize) * 0x2000 + (addr as usize - 0xA000);
+                        self.external_ram.get(offset).copied().unwrap_or(0xFF)
+                    } else {
+                        0xFF
+                    }
+                }
                 _ => 0xFF,
             },
         }
@@ -102,7 +138,7 @@ impl Cartridge {
             MBCType::MBC1 => {
                 match addr {
                     0x0000..=0x1FFF => {
-                        // RAM enable/disable
+                        self.ram_enabled = (value & 0x0F) == 0x0A;
                     }
                     0x2000..=0x3FFF => {
                         // set lower 5 bits of ROM bank number
@@ -124,6 +160,15 @@ impl Cartridge {
                         // banking mode select
                         self.banking_mode = value & 0x01;
                     }
+                    0xA000..=0xBFFF => {
+                        if self.ram_enabled && !self.external_ram.is_empty() {
+                            let bank = if self.banking_mode == 1 { self.ram_bank } else { 0 };
+                            let offset = (bank as usize) * 0x2000 + (addr as usize - 0xA000);
+                            if let Some(cell) = self.external_ram.get_mut(offset) {
+                                *cell = value;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -138,7 +183,7 @@ impl Cartridge {
             MBCType::MBC3 => {
                 match addr {
                     0x0000..=0x1FFF => {
-                        // RAM and timer enable/disable
+                        self.ram_enabled = (value & 0x0F) == 0x0A;
                     }
                     0x2000..=0x3FFF => {
                         // set ROM bank number (7 bits)
@@ -149,10 +194,18 @@ impl Cartridge {
                     }
                     0x4000..=0x5FFF => {
                         // set RAM bank number or RTC register select
-                        self.ram_bank = value & 0x03;
+                        self.ram_bank = value;
                     }
                     0x6000..=0x7FFF => {
                         // latch clock data
+                    }
+                    0xA000..=0xBFFF => {
+                        if self.ram_enabled && self.ram_bank <= 0x03 && !self.external_ram.is_empty() {
+                            let offset = (self.ram_bank as usize) * 0x2000 + (addr as usize - 0xA000);
+                            if let Some(cell) = self.external_ram.get_mut(offset) {
+                                *cell = value;
+                            }
+                        }
                     }
                     _ => {}
                 }

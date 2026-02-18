@@ -34,7 +34,7 @@ pub struct Ppu {
 impl Ppu {
     pub fn new() -> Self {
         Self {
-            video_ram: vec![0xFF; VRAM_SIZE as usize + 1],
+            video_ram: vec![0x00; VRAM_SIZE as usize + 1],
             frame_buffer: vec![0x00FFFFFFu32; 160 * 144],
             mode: 0,
             oam: vec![0xFF; 160], // 160 bytes for OAM
@@ -225,6 +225,7 @@ impl Ppu {
         let mut bg_color_ids = [0u8; 160];
 
         self.oam_scan();
+
 
         for (x, bg_color_id) in bg_color_ids.iter_mut().enumerate().take(window_width) {
             let bg_map_y: u16 = (self.scy as u16 + self.ly as u16) % 256;
