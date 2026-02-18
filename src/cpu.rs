@@ -20,7 +20,6 @@ pub struct Cpu {
     ime: bool,
     enable_ime_next: bool,
     stopped: bool,
-    halt_bug: bool,
 }
 
 impl Cpu {
@@ -33,7 +32,6 @@ impl Cpu {
             ime: false, // IME should start disabled
             enable_ime_next: false,
             stopped: false,
-            halt_bug: false,
         }
     }
 
@@ -244,6 +242,7 @@ impl Cpu {
         value
     }
 
+    #[allow(dead_code)]
     fn print_register_data(&self) {
         println!("A: {:02X} F: {:02X} B: {:02X} C: {:02X} D: {:02X} E: {:02X} H: {:02X} L: {:02X} SP: {:04X} PC: 00:{:04X} ({:02X} {:02X} {:02X} {:02X})",
         self.reg.a, self.reg.f, self.reg.b, self.reg.c, self.reg.d, self.reg.e, self.reg.h, self.reg.l, self.reg.sp, self.reg.pc,
@@ -553,7 +552,6 @@ impl Cpu {
 
         let a = self.reg.a;
         self.bus.write_byte(self.reg.get_de(), a);
-
     }
 
     // increment contents of register pair DE by 1
@@ -984,7 +982,7 @@ impl Cpu {
 
     fn ld_b_b(&mut self) {
         self.m = 1;
-        self.reg.b = self.reg.b;
+        // LD B, B — no-op
     }
     fn ld_b_c(&mut self) {
         self.m = 1;
@@ -1022,7 +1020,7 @@ impl Cpu {
     }
     fn ld_c_c(&mut self) {
         self.m = 1;
-        self.reg.c = self.reg.c;
+        // LD C, C — no-op
     }
     fn ld_c_d(&mut self) {
         self.m = 1;
@@ -1060,7 +1058,7 @@ impl Cpu {
     }
     fn ld_d_d(&mut self) {
         self.m = 1;
-        self.reg.d = self.reg.d;
+        // LD D, D — no-op
     }
     fn ld_d_e(&mut self) {
         self.m = 1;
@@ -1098,7 +1096,7 @@ impl Cpu {
     }
     fn ld_e_e(&mut self) {
         self.m = 1;
-        self.reg.e = self.reg.e;
+        // LD E, E — no-op
     }
     fn ld_e_h(&mut self) {
         self.m = 1;
@@ -1136,7 +1134,7 @@ impl Cpu {
     }
     fn ld_h_h(&mut self) {
         self.m = 1;
-        self.reg.h = self.reg.h;
+        // LD H, H — no-op
     }
     fn ld_h_l(&mut self) {
         self.m = 1;
@@ -1174,7 +1172,7 @@ impl Cpu {
     }
     fn ld_l_l(&mut self) {
         self.m = 1;
-        self.reg.l = self.reg.l;
+        // LD L, L — no-op
     }
     fn ld_l_hl(&mut self) {
         self.m = 2;
@@ -2322,267 +2320,6 @@ impl Cpu {
         self.reg.pc = 0x38;
     }
 
-    fn decode_execute_opcode(&mut self, opcode: u8) {
-        match opcode {
-            0x00 => self.nop(),
-            0x01 => self.load_bc(),
-            0x02 => self.load_bc_a(),
-            0x03 => self.inc_bc(),
-            0x04 => self.inc_b(),
-            0x05 => self.dec_b(),
-            0x06 => self.load_b(),
-            0x07 => self.rlca(),
-            0x08 => self.load_sp_at_addr(),
-            0x09 => self.add_hl_bc(),
-            0x0A => self.ld_a_bc(),
-            0x0B => self.dec_bc(),
-            0x0C => self.inc_c(),
-            0x0D => self.dec_c(),
-            0x0E => self.ld_c(),
-            0x0F => self.rrca(),
-            0x10 => self.stop(),
-            0x11 => self.ld_de(),
-            0x12 => self.ld_de_a(),
-            0x13 => self.inc_de(),
-            0x14 => self.inc_d(),
-            0x15 => self.dec_d(),
-            0x16 => self.ld_d(),
-            0x17 => self.rla(),
-            0x18 => self.jr(),
-            0x19 => self.add_hl_de(),
-            0x1A => self.ld_a_de(),
-            0x1B => self.dec_de(),
-            0x1C => self.inc_e(),
-            0x1D => self.dec_e(),
-            0x1E => self.ld_e(),
-            0x1F => self.rra(),
-            0x20 => self.jr_nz(),
-            0x21 => self.ld_hl(),
-            0x22 => self.ld_hl_inc_a(),
-            0x23 => self.inc_hl(),
-            0x24 => self.inc_h(),
-            0x25 => self.dec_h(),
-            0x26 => self.ld_h(),
-            0x27 => self.daa(),
-            0x28 => self.jr_z(),
-            0x29 => self.add_hl_hl(),
-            0x2A => self.ld_a_hl_plus(),
-            0x2B => self.dec_hl(),
-            0x2C => self.inc_l(),
-            0x2D => self.dec_l(),
-            0x2E => self.ld_l(),
-            0x2F => self.cpl(),
-            0x30 => self.jr_nc(),
-            0x31 => self.ld_sp(),
-            0x32 => self.ld_hlm_a(),
-            0x33 => self.inc_sp(),
-            0x34 => self.inc_content_at_hl(),
-            0x35 => self.dec_content_at_hl(),
-            0x36 => self.ld_hl_byte(),
-            0x37 => self.scf(),
-            0x38 => self.jr_c(),
-            0x39 => self.add_hl_sp(),
-            0x3A => self.ld_a_hl_dec(),
-            0x3B => self.dec_sp(),
-            0x3C => self.inc_a(),
-            0x3D => self.dec_a(),
-            0x3E => self.ld_a_byte(),
-            0x3F => self.ccf(),
-            0x40 => self.ld_b_b(),
-            0x41 => self.ld_b_c(),
-            0x42 => self.ld_b_d(),
-            0x43 => self.ld_b_e(),
-            0x44 => self.ld_b_h(),
-            0x45 => self.ld_b_l(),
-            0x46 => self.ld_b_hl(),
-            0x47 => self.ld_b_a(),
-            0x48 => self.ld_c_b(),
-            0x49 => self.ld_c_c(),
-            0x4A => self.ld_c_d(),
-            0x4B => self.ld_c_e(),
-            0x4C => self.ld_c_h(),
-            0x4D => self.ld_c_l(),
-            0x4E => self.ld_c_hl(),
-            0x4F => self.ld_c_a(),
-            0x50 => self.ld_d_b(),
-            0x51 => self.ld_d_c(),
-            0x52 => self.ld_d_d(),
-            0x53 => self.ld_d_e(),
-            0x54 => self.ld_d_h(),
-            0x55 => self.ld_d_l(),
-            0x56 => self.ld_d_hl(),
-            0x57 => self.ld_d_a(),
-            0x58 => self.ld_e_b(),
-            0x59 => self.ld_e_c(),
-            0x5A => self.ld_e_d(),
-            0x5B => self.ld_e_e(),
-            0x5C => self.ld_e_h(),
-            0x5D => self.ld_e_l(),
-            0x5E => self.ld_e_hl(),
-            0x5F => self.ld_e_a(),
-            0x60 => self.ld_h_b(),
-            0x61 => self.ld_h_c(),
-            0x62 => self.ld_h_d(),
-            0x63 => self.ld_h_e(),
-            0x64 => self.ld_h_h(),
-            0x65 => self.ld_h_l(),
-            0x66 => self.ld_h_hl(),
-            0x67 => self.ld_h_a(),
-            0x68 => self.ld_l_b(),
-            0x69 => self.ld_l_c(),
-            0x6A => self.ld_l_d(),
-            0x6B => self.ld_l_e(),
-            0x6C => self.ld_l_h(),
-            0x6D => self.ld_l_l(),
-            0x6E => self.ld_l_hl(),
-            0x6F => self.ld_l_a(),
-            0x70 => self.ld_hl_b(),
-            0x71 => self.ld_hl_c(),
-            0x72 => self.ld_hl_d(),
-            0x73 => self.ld_hl_e(),
-            0x74 => self.ld_hl_h(),
-            0x75 => self.ld_hl_l(),
-            0x76 => self.halt(),
-            0x77 => self.ld_hl_a(),
-            0x78 => self.ld_a_b(),
-            0x79 => self.ld_a_c(),
-            0x7A => self.ld_a_d(),
-            0x7B => self.ld_a_e(),
-            0x7C => self.ld_a_h(),
-            0x7D => self.ld_a_l(),
-            0x7E => self.ld_a_hl(),
-            0x7F => self.ld_a_a(),
-            0x80 => self.add_a_b(),
-            0x81 => self.add_a_c(),
-            0x82 => self.add_a_d(),
-            0x83 => self.add_a_e(),
-            0x84 => self.add_a_h(),
-            0x85 => self.add_a_l(),
-            0x86 => self.add_a_hl(),
-            0x87 => self.add_a_a(),
-            0x88 => self.adc_a_b(),
-            0x89 => self.adc_a_c(),
-            0x8A => self.adc_a_d(),
-            0x8B => self.adc_a_e(),
-            0x8C => self.adc_a_h(),
-            0x8D => self.adc_a_l(),
-            0x8E => self.adc_a_hl(),
-            0x8F => self.adc_a_a(),
-            0x90 => self.sub_b(),
-            0x91 => self.sub_c(),
-            0x92 => self.sub_d(),
-            0x93 => self.sub_e(),
-            0x94 => self.sub_h(),
-            0x95 => self.sub_l(),
-            0x96 => self.sub_hl(),
-            0x97 => self.sub_a(),
-            0x98 => self.sbc_a_b(),
-            0x99 => self.sbc_a_c(),
-            0x9A => self.sbc_a_d(),
-            0x9B => self.sbc_a_e(),
-            0x9C => self.sbc_a_h(),
-            0x9D => self.sbc_a_l(),
-            0x9E => self.sbc_a_hl(),
-            0x9F => self.sbc_a_a(),
-            0xA0 => self.and_a_b(),
-            0xA1 => self.and_a_c(),
-            0xA2 => self.and_a_d(),
-            0xA3 => self.and_a_e(),
-            0xA4 => self.and_a_h(),
-            0xA5 => self.and_a_l(),
-            0xA6 => self.and_a_hl(),
-            0xA7 => self.and_a_a(),
-            0xA8 => self.xor_a_b(),
-            0xA9 => self.xor_a_c(),
-            0xAA => self.xor_a_d(),
-            0xAB => self.xor_a_e(),
-            0xAC => self.xor_a_h(),
-            0xAD => self.xor_a_l(),
-            0xAE => self.xor_a_hl(),
-            0xAF => self.xor_a_a(),
-            0xB0 => self.or_a_b(),
-            0xB1 => self.or_a_c(),
-            0xB2 => self.or_a_d(),
-            0xB3 => self.or_a_e(),
-            0xB4 => self.or_a_h(),
-            0xB5 => self.or_a_l(),
-            0xB6 => self.or_a_hl(),
-            0xB7 => self.or_a_a(),
-            0xB8 => self.cp_a_b(),
-            0xB9 => self.cp_a_c(),
-            0xBA => self.cp_a_d(),
-            0xBB => self.cp_a_e(),
-            0xBC => self.cp_a_h(),
-            0xBD => self.cp_a_l(),
-            0xBE => self.cp_a_hl(),
-            0xBF => self.cp_a_a(),
-            0xC0 => self.ret_nz(),
-            0xC1 => self.pop_bc(),
-            0xC2 => self.jp_nz(),
-            0xC3 => self.jp(),
-            0xC4 => self.call_nz(),
-            0xC5 => self.push_bc(),
-            0xC6 => self.add_a_byte(),
-            0xC7 => self.rst_zero(),
-            0xC8 => self.ret_z(),
-            0xC9 => self.ret(),
-            0xCA => self.jp_z(),
-            0xCB => self.call_cb(),
-            0xCC => self.call_z(),
-            0xCD => self.call(),
-            0xCE => self.adc_a(),
-            0xCF => self.rst_one(),
-            0xD0 => self.ret_nc(),
-            0xD1 => self.pop_de(),
-            0xD2 => self.jp_nc(),
-            0xD3 => self.nop(), // Undefined opcode
-            0xD4 => self.call_nc(),
-            0xD5 => self.push_de(),
-            0xD6 => self.sub_imm(),
-            0xD7 => self.rst_two(),
-            0xD8 => self.ret_c(),
-            0xD9 => self.reti(),
-            0xDA => self.jp_c(),
-            0xDB => self.nop(), // Undefined opcode
-            0xDC => self.call_c(),
-            0xDD => self.nop(), // Undefined opcode
-            0xDE => self.sbc_a(),
-            0xDF => self.rst_three(),
-            0xE0 => self.ld_addr_a(),
-            0xE1 => self.pop_hl(),
-            0xE2 => self.ld_addr_c_a(),
-            0xE3 => self.nop(), // Undefined opcode
-            0xE4 => self.nop(), // Undefined opcode
-            0xE5 => self.push_hl(),
-            0xE6 => self.and_a(),
-            0xE7 => self.rst_four(),
-            0xE8 => self.add_sp(),
-            0xE9 => self.jp_hl(),
-            0xEA => self.ld_addr_a16_a(),
-            0xEB => self.nop(), // Undefined opcode
-            0xEC => self.nop(), // Undefined opcode
-            0xED => self.nop(), // Undefined opcode
-            0xEE => self.xor_d8(),
-            0xEF => self.rst_five(),
-            0xF0 => self.ld_a_a8(),
-            0xF1 => self.pop_af(),
-            0xF2 => self.ld_a_c_addr(),
-            0xF3 => self.di(),
-            0xF5 => self.push_af(),
-            0xF6 => self.or_d8(),
-            0xF7 => self.rst_six(),
-            0xF8 => self.ld_hl_sp_s8(),
-            0xF9 => self.ld_sp_hl(),
-            0xFA => self.ld_a_a16(),
-            0xFB => self.ei(),
-            0xFC => self.nop(), // Undefined opcode
-            0xFD => self.nop(), // Undefined opcode
-            0xFE => self.cp_d8(),
-            0xFF => self.rst_seven(),
-            _ => println!("{opcode:#X} is not a recognized opcode..."),
-        }
-    }
-
     fn decode_execute(&mut self) {
         let opcode = self.read_byte();
         match opcode {
@@ -2854,7 +2591,7 @@ impl Cpu {
 
         if self.halted {
             self.m = 1;
-            self.bus.update_ly(self.m);
+            self.bus.if_ |= self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
 
             if self.bus.timer.interrupt {
@@ -2898,8 +2635,9 @@ impl Cpu {
 
         if !self.halted {
             self.decode_execute();
+            //self.print_register_data();
 
-            self.bus.update_ly(self.m);
+            self.bus.if_ |= self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
 
             if self.bus.timer.interrupt {
@@ -2950,7 +2688,6 @@ impl Cpu {
     }
     fn ld_a_a(&mut self) {
         self.m = 1;
-        //self.reg.a = self.reg.a;
     }
 }
 

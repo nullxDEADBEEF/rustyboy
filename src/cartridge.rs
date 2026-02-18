@@ -5,6 +5,8 @@ use std::path::Path;
 enum MBCType {
     RomOnly,
     MBC1,
+    MBC2,
+    MBC3,
 }
 
 pub struct Cartridge {
@@ -44,9 +46,11 @@ impl Cartridge {
         self.mbc_type = match self.data[0x0147] {
             0x00 => MBCType::RomOnly,
             0x01..=0x03 => MBCType::MBC1,
+            0x05..=0x06 => MBCType::MBC2,
+            0x0F..=0x13 => MBCType::MBC3,
             _ => MBCType::RomOnly,
         };
-        //println!("{:?} loaded.", path);
+        println!("{:?} loaded.", path);
         self.get_title();
         self.get_cartridge_type();
         self.get_rom_size();
@@ -63,6 +67,26 @@ impl Cartridge {
                 0x0000..=0x3FFF => self.data[addr as usize],
                 0x4000..=0x7FFF => {
                     let bank = self.rom_bank & 0x1F;
+                    let bank = if bank == 0 { 1 } else { bank };
+                    let offset = (bank as usize) * 0x4000 + (addr as usize - 0x4000);
+                    self.data.get(offset).copied().unwrap_or(0xFF)
+                }
+                _ => 0xFF,
+            },
+            MBCType::MBC2 => match addr {
+                0x0000..=0x3FFF => self.data[addr as usize],
+                0x4000..=0x7FFF => {
+                    let bank = self.rom_bank & 0x0F;
+                    let bank = if bank == 0 { 1 } else { bank };
+                    let offset = (bank as usize) * 0x4000 + (addr as usize - 0x4000);
+                    self.data.get(offset).copied().unwrap_or(0xFF)
+                }
+                _ => 0xFF,
+            },
+            MBCType::MBC3 => match addr {
+                0x0000..=0x3FFF => self.data[addr as usize],
+                0x4000..=0x7FFF => {
+                    let bank = self.rom_bank & 0x7F;
                     let bank = if bank == 0 { 1 } else { bank };
                     let offset = (bank as usize) * 0x4000 + (addr as usize - 0x4000);
                     self.data.get(offset).copied().unwrap_or(0xFF)
@@ -86,7 +110,6 @@ impl Cartridge {
                         if self.rom_bank & 0x1F == 0 {
                             self.rom_bank = (self.rom_bank & 0xE0) | 1;
                         }
-                        //println!("ROM BANK SET TO: {}", self.rom_bank);
                     }
                     0x4000..=0x5FFF => {
                         // set upper 2 bits of ROM/RAM bank
@@ -100,6 +123,36 @@ impl Cartridge {
                     0x6000..=0x7FFF => {
                         // banking mode select
                         self.banking_mode = value & 0x01;
+                    }
+                    _ => {}
+                }
+            }
+            MBCType::MBC2 => {
+                if let 0x0000..=0x3FFF = addr {
+                    self.rom_bank = value & 0x0F;
+                    if self.rom_bank == 0 {
+                        self.rom_bank = 1;
+                    }
+                }
+            }
+            MBCType::MBC3 => {
+                match addr {
+                    0x0000..=0x1FFF => {
+                        // RAM and timer enable/disable
+                    }
+                    0x2000..=0x3FFF => {
+                        // set ROM bank number (7 bits)
+                        self.rom_bank = value & 0x7F;
+                        if self.rom_bank == 0 {
+                            self.rom_bank = 1;
+                        }
+                    }
+                    0x4000..=0x5FFF => {
+                        // set RAM bank number or RTC register select
+                        self.ram_bank = value & 0x03;
+                    }
+                    0x6000..=0x7FFF => {
+                        // latch clock data
                     }
                     _ => {}
                 }

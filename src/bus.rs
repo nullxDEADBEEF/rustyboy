@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::{cartridge::Cartridge, serial::Serial, timer::Timer};
+use crate::{cartridge::Cartridge, ppu::Ppu, serial::Serial, timer::Timer};
 
 // NOTE: "word" in this context means 16-bit
 
@@ -27,28 +27,19 @@ const HRAM_END: u16 = 0xFFFE;
 const INTERRUPT_ENABLE: u16 = 0xFFFF;
 
 const WRAM_SIZE: u16 = 0x1FFF;
-const VRAM_SIZE: u16 = 0x1FFF;
 const HRAM_SIZE: u16 = 0x7F;
 
 // can be read from or written to by the CPU
 pub struct Bus {
     pub timer: Timer,
+    pub ppu: Ppu,
     rom: Cartridge,
     serial: Serial,
     // internal ram
     working_ram: Vec<u8>,
-    // stores graphic tiles
-    video_ram: Vec<u8>,
-    // OAM stores data that tells the gameboy
-    // which tiles to use to construct moving objects on the screen
-    oam: Vec<u8>,
     high_ram: Vec<u8>,
-    ly: u8,
-    ly_cycles: u16,
-    stat: u8,    // 0xFF41
-    lyc: u8,     // 0xFF45
-    ie: u8,      // 0xFFFF - Interrupt Enable
-    pub if_: u8, // 0xFF0F - Interrupt Flag
+    ie: u8,
+    pub if_: u8, // Interrupt Flag reference for STAT and VBlank interrupts
 }
 
 impl Bus {
@@ -57,21 +48,15 @@ impl Bus {
             timer: Timer::new(),
             serial: Serial::new(),
             rom: Cartridge::new(),
+            ppu: Ppu::new(),
             working_ram: vec![0xFF; WRAM_SIZE as usize + 1],
-            video_ram: vec![0xFF; VRAM_SIZE as usize + 1],
-            oam: vec![0xFF; 160], // 160 bytes for OAM
             high_ram: vec![0xFF; HRAM_SIZE as usize + 1],
-            ly: 0,
-            ly_cycles: 0,
-            stat: 0x85,
-            lyc: 0x00,
             ie: 0x00,
             if_: 0x00,
         };
 
         bus.rom.load(rom_file).unwrap();
-        // TODO: uncomment at some point
-        //println!("{}", bus.rom);
+        println!("{}", bus.rom);
 
         // hardware registers - boot ROM values
         //bus.write_byte(0xFF00, 0xCF); // Joypad
@@ -119,7 +104,7 @@ impl Bus {
         match addr {
             // from cartridge, usually fixed bank
             ROM_START..=ROM_END => self.rom.read_byte(addr),
-            VRAM_START..=VRAM_END => self.video_ram[addr as usize & VRAM_SIZE as usize],
+            VRAM_START..=VRAM_END => self.ppu.read_byte(addr),
             0xA000..=0xBFFF => self.rom.read_byte(addr),
             WRAM_START..=WRAM_END => self.working_ram[addr as usize & WRAM_SIZE as usize],
             0xE000..=0xFDFF => {
@@ -128,10 +113,7 @@ impl Bus {
                 self.working_ram[mirrored_addr as usize & WRAM_SIZE as usize]
             }
             // sprite attribute table
-            SPRITE_OAM_START..=SPRITE_OAM_END => {
-                let oam_addr = addr - SPRITE_OAM_START;
-                self.oam[oam_addr as usize]
-            }
+            SPRITE_OAM_START..=SPRITE_OAM_END => self.ppu.read_byte(addr),
             // prohibited area
             0xFEA0..=0xFEFF => 0,
             // I/O registers
@@ -143,47 +125,7 @@ impl Bus {
             // high ram (HRAM)
             HRAM_START..=HRAM_END => self.high_ram[addr as usize & HRAM_SIZE as usize],
             INTERRUPT_ENABLE => self.ie & 0x1F,
-            0xFF41 => {
-                let mut stat = self.stat & 0xFC; // lower 2 bits are mode
-                let mode = if self.ly >= 144 {
-                    1 // v-blank
-                } else if self.ly_cycles < 80 {
-                    2 // OAM
-                } else if self.ly_cycles < 204 {
-                    3 // Transfer
-                } else {
-                    0 // h-blank
-                };
-                stat |= mode;
-                if self.ly == self.lyc {
-                    stat |= 0x04; // set coincidence flag
-                }
-
-                stat
-            }
-            0xFF44 => {
-                self.ly
-            }
-            0xFF45 => self.lyc,
-            // LCD Control Register
-            0xFF40 => 0x91, // Default LCD enabled with background enabled
-            // LCD Scroll Y
-            0xFF42 => 0x00,
-            // LCD Scroll X
-            0xFF43 => 0x00,
-            // DMA Transfer and Start Address
-            0xFF46 => 0x00,
-            // BG Palette Data
-            0xFF47 => 0xFC,
-            // Object Palette 0 Data
-            0xFF48 => 0xFF,
-            // Object Palette 1 Data
-            0xFF49 => 0xFF,
-            // Window Y Position
-            0xFF4A => 0x00,
-            // Window X Position minus 7
-            0xFF4B => 0x00,
-            // Unhandled I/O registers - return reasonable defaults
+            0xFF40..=0xFF4B => self.ppu.read_byte(addr),
             _ => {
                 // For now, return 0 for unhandled registers
                 // This prevents the debug spam and allows the test to continue
@@ -196,7 +138,7 @@ impl Bus {
         match addr {
             // from cartridge, usually fixed bank
             ROM_START..=ROM_END => self.rom.write_byte(addr, value),
-            VRAM_START..=VRAM_END => self.video_ram[addr as usize & VRAM_SIZE as usize] = value,
+            VRAM_START..=VRAM_END => self.ppu.write_byte(addr, value),
             0xA000..=0xBFFF => self.rom.write_byte(addr, value),
             WRAM_START..=WRAM_END => {
                 self.working_ram[addr as usize & WRAM_SIZE as usize] = value;
@@ -214,8 +156,7 @@ impl Bus {
             }
             // sprite attribute table
             SPRITE_OAM_START..=SPRITE_OAM_END => {
-                let oam_addr = addr - SPRITE_OAM_START;
-                self.oam[oam_addr as usize] = value;
+                self.ppu.write_byte(addr, value);
             }
             // prohibited area
             0xFEA0..=0xFEFF => {}
@@ -225,32 +166,16 @@ impl Bus {
             TIMER_START..=TIMER_END => self.timer.write_byte(addr, value),
             INTERRUPT_FLAG => self.if_ = value & 0x1F,
             SOUND_START..=SOUND_END => {}
-            0xFF41 => self.stat = value & 0x7C, // only bits 2-6 are writable
-            0xFF45 => self.lyc = value,
-            // LCD Control Register
-            0xFF40 => {} // TODO: implement LCD control
-            // LCD Scroll Y
-            0xFF42 => {}
-            // LCD Scroll X
-            0xFF43 => {}
+            0xFF40..=0xFF43 | 0xFF45 => self.ppu.write_byte(addr, value),
             // DMA Transfer and Start Address
             0xFF46 => {
                 let source_addr = (value as u16) << 8;
                 for i in 0..160 {
                     let byte = self.read_byte(source_addr + i);
-                    self.oam[i as usize] = byte;
+                    self.ppu.oam[i as usize] = byte;
                 }
             }
-            // BG Palette Data
-            0xFF47 => {}
-            // Object Palette 0 Data
-            0xFF48 => {}
-            // Object Palette 1 Data
-            0xFF49 => {}
-            // Window Y Position
-            0xFF4A => {}
-            // Window X Position minus 7
-            0xFF4B => {}
+            0xFF47..=0xFF4B => self.ppu.write_byte(addr, value),
             // high ram (HRAM)
             HRAM_START..=HRAM_END => self.high_ram[addr as usize & HRAM_SIZE as usize] = value,
             // interrupt enable register (IE)
@@ -261,38 +186,13 @@ impl Bus {
         }
     }
 
-    pub fn read_word(&self, addr: u16) -> u16 {
+    pub fn read_word(&mut self, addr: u16) -> u16 {
         (self.read_byte(addr) as u16) | ((self.read_byte(addr + 1) as u16) << 8)
     }
 
     pub fn write_word(&mut self, addr: u16, value: u16) {
         self.write_byte(addr, (value & 0xFF) as u8);
         self.write_byte(addr + 1, (value >> 8) as u8);
-    }
-
-    pub fn update_ly(&mut self, cycles: u8) {
-        self.ly_cycles += cycles as u16;
-        while self.ly_cycles >= 456 {
-            self.ly_cycles -= 456;
-            self.ly = self.ly.wrapping_add(1);
-            if self.ly > 153 {
-                self.ly = 0;
-            }
-
-            if self.ly == 144 {
-                self.if_ |= 0x01;
-            }
-
-            // STAT coincidence flag and interrupt
-            if self.ly == self.lyc {
-                self.stat |= 0x04;
-                if self.stat & 0x40 != 0 {
-                    self.if_ |= 0x02;
-                }
-            } else {
-                self.stat &= !0x04;
-            }
-        }
     }
 
     pub fn serial_mut(&mut self) -> &mut Serial {
