@@ -61,9 +61,8 @@ fn get_audio_device() -> Device {
 
     if let Some(audio_output_device) = default_audio_host.default_output_device()
     {
-        return audio_output_device
+        audio_output_device
     } else {
         panic!("No output device found")
-    };
-
+    }
 }

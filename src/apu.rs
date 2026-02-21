@@ -267,20 +267,18 @@ impl SquareChannel {
             self.freq_timer -= 1;
         }
 
-        let mut amplitude: i32 = 0;
-
         if self.freq_timer == 0 {
             let freq = (self.freq_high as u16) << 8 | self.freq_low as u16;
             self.freq_timer = (2048 - freq) * 4;
             self.duty_position = (self.duty_position + 1) & 7;
         }
 
-        if self.enabled && self.dac_enabled {
+        let amplitude: i32 = if self.enabled && self.dac_enabled {
             let duty = DUTY_TABLE[self.duty_cycle as usize][self.duty_position as usize] as i32;
-            amplitude = duty * self.current_volume as i32 * 256;
+            duty * self.current_volume as i32 * 256
         } else {
-            amplitude = 0;
-        }
+            0
+        };
 
         if amplitude != self.last_amp {
             let amp_delta = amplitude - self.last_amp;
@@ -289,6 +287,6 @@ impl SquareChannel {
             return Some(amp_delta);
         }
 
-        return None;
+        None
     }
 }
