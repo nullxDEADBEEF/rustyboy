@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::{cartridge::Cartridge, ppu::Ppu, serial::Serial, timer::Timer};
+use crate::{apu::Apu, cartridge::Cartridge, ppu::Ppu, serial::Serial, timer::Timer};
 
 // NOTE: "word" in this context means 16-bit
 
@@ -22,6 +22,8 @@ const TIMER_END: u16 = 0xFF07;
 const INTERRUPT_FLAG: u16 = 0xFF0F;
 const SOUND_START: u16 = 0xFF10;
 const SOUND_END: u16 = 0xFF26;
+const WAVE_RAM_START: u16 = 0xFF30;
+const WAVE_RAM_END: u16 = 0xFF3F;
 const HRAM_START: u16 = 0xFF80;
 const HRAM_END: u16 = 0xFFFE;
 const INTERRUPT_ENABLE: u16 = 0xFFFF;
@@ -33,6 +35,7 @@ const HRAM_SIZE: u16 = 0x7F;
 pub struct Bus {
     pub timer: Timer,
     pub ppu: Ppu,
+    pub apu: Apu,
     rom: Cartridge,
     serial: Serial,
     // internal ram
@@ -43,12 +46,13 @@ pub struct Bus {
 }
 
 impl Bus {
-    pub fn new(rom_file: &Path) -> Self {
+    pub fn new(rom_file: &Path, sample_rate: u32) -> Self {
         let mut bus = Self {
             timer: Timer::new(),
             serial: Serial::new(),
             rom: Cartridge::new(),
             ppu: Ppu::new(),
+            apu: Apu::new(sample_rate),
             working_ram: vec![0xFF; WRAM_SIZE as usize + 1],
             high_ram: vec![0xFF; HRAM_SIZE as usize + 1],
             ie: 0x00,
@@ -82,7 +86,8 @@ impl Bus {
             SERIAL_START..=SERIAL_END => self.serial.read_byte(addr),
             TIMER_START..=TIMER_END => self.timer.read_byte(addr),
             INTERRUPT_FLAG => self.if_ & 0x1F,
-            SOUND_START..=SOUND_END => 0,
+            SOUND_START..=SOUND_END => self.apu.read_byte(addr),
+            WAVE_RAM_START..=WAVE_RAM_END => self.apu.read_byte(addr),
             // high ram (HRAM)
             HRAM_START..=HRAM_END => self.high_ram[addr as usize & HRAM_SIZE as usize],
             INTERRUPT_ENABLE => self.ie & 0x1F,
@@ -122,11 +127,12 @@ impl Bus {
             // prohibited area
             0xFEA0..=0xFEFF => {}
             // I/O registers
-            JOYPAD => {},
+            JOYPAD => {}
             SERIAL_START..=SERIAL_END => self.serial.write_byte(addr, value),
             TIMER_START..=TIMER_END => self.timer.write_byte(addr, value),
             INTERRUPT_FLAG => self.if_ = value & 0x1F,
-            SOUND_START..=SOUND_END => {}
+            SOUND_START..=SOUND_END => self.apu.write_byte(addr, value),
+            WAVE_RAM_START..=WAVE_RAM_END => self.apu.write_byte(addr, value),
             0xFF40..=0xFF43 | 0xFF45 => self.ppu.write_byte(addr, value),
             // DMA Transfer and Start Address
             0xFF46 => {

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::mpsc::SyncSender};
 
 use minifb::{Key, Window, WindowOptions};
 
@@ -9,12 +9,14 @@ const HEIGHT: usize = 144;
 
 pub struct Gameboy {
     pub cpu: Cpu,
+    sample_sender: SyncSender<Vec<i16>>,
 }
 
 impl Gameboy {
-    pub fn new(rom_file: &Path) -> Self {
+    pub fn new(rom_file: &Path, sample_rate: u32, sample_sender: SyncSender<Vec<i16>>) -> Self {
         Self {
-            cpu: Cpu::new(rom_file),
+            cpu: Cpu::new(rom_file, sample_rate),
+            sample_sender,
         }
     }
 
@@ -33,6 +35,8 @@ impl Gameboy {
             while cycles_run < cycles_per_frame {
                 cycles_run += self.cpu.run_cycle() as u32;
             }
+            let samples = self.cpu.bus.apu.end_frame();
+            let _ = self.sample_sender.try_send(samples);
             window
                 .update_with_buffer(&self.cpu.bus.ppu.frame_buffer, WIDTH, HEIGHT)
                 .unwrap();

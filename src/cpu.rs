@@ -23,10 +23,10 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    pub fn new(rom_file: &Path) -> Self {
+    pub fn new(rom_file: &Path, sample_rate: u32) -> Self {
         Self {
             reg: Register::new(),
-            bus: Bus::new(rom_file),
+            bus: Bus::new(rom_file, sample_rate),
             m: 0,
             halted: false,
             ime: false, // IME should start disabled
@@ -2593,6 +2593,7 @@ impl Cpu {
             self.m = 1;
             self.bus.if_ |= self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
+            self.bus.apu.step(self.m);
 
             if self.bus.timer.interrupt {
                 self.bus.if_ |= 0x04;
@@ -2639,6 +2640,7 @@ impl Cpu {
 
             self.bus.if_ |= self.bus.ppu.update_ly(self.m);
             self.bus.timer.update(self.m);
+            self.bus.apu.step(self.m);
 
             if self.bus.timer.interrupt {
                 self.bus.if_ |= 0x04;
