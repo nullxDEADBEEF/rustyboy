@@ -226,7 +226,6 @@ impl Ppu {
 
         self.oam_scan();
 
-
         for (x, bg_color_id) in bg_color_ids.iter_mut().enumerate().take(window_width) {
             let bg_map_y: u16 = (self.scy as u16 + self.ly as u16) % 256;
             let bg_map_x: u16 = (self.scx as u16 + x as u16) % 256;
