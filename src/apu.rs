@@ -7,6 +7,7 @@ pub struct Apu {
     ch1: SquareChannel,
     ch2: SquareChannel,
     ch3: WaveChannel,
+    ch4: NoiseChannel,
 
     frame_sequencer_counter: u32,
     frame_sequencer_step: u8,
@@ -23,6 +24,8 @@ const DUTY_TABLE: [[u8; 8]; 4] = [
     [1, 1, 1, 1, 1, 1, 0, 0], // 75%
 ];
 
+const DIVISOR_TABLE: [u16; 8] = [8, 16, 32, 48, 64, 80, 96, 112];
+
 impl Apu {
     pub fn new(sample_rate: u32) -> Self {
         let mut apu = Self {
@@ -32,6 +35,7 @@ impl Apu {
             ch1: SquareChannel::new(),
             ch2: SquareChannel::new(),
             ch3: WaveChannel::new(),
+            ch4: NoiseChannel::new(),
             frame_sequencer_counter: 0,
             frame_sequencer_step: 0,
             blip_left: BlipBuf::new(sample_rate / 60 + 100), // one frame plus padding
@@ -64,10 +68,23 @@ impl Apu {
             }
             0xFF18 => 0xFF, // read-only
             0xFF19 => 0xBF | ((self.ch2.length_enable as u8) << 6),
+            0xFF20 => 0xFF,
+            0xFF21 => {
+                (self.ch4.initial_volume << 4)
+                    | ((self.ch4.env_add_mode as u8) << 3)
+                    | self.ch4.env_period
+            }
+            0xFF22 => {
+                (self.ch4.clock_shift << 4)
+                    | ((self.ch4.width_mode as u8) << 3)
+                    | self.ch4.divisor_code
+            }
+            0xFF23 => 0xBF | ((self.ch4.length_enable as u8) << 6),
             0xFF24 => self.nr50,
             0xFF25 => self.nr51,
             0xFF26 => {
                 0x70 | ((self.enabled as u8) << 7)
+                    | ((self.ch4.enabled as u8) << 3)
                     | ((self.ch3.enabled as u8) << 2)
                     | ((self.ch2.enabled as u8) << 1)
                     | (self.ch1.enabled as u8)
@@ -179,6 +196,40 @@ impl Apu {
                     self.ch2.duty_position = 0;
                 }
             }
+            0xFF20 => self.ch4.length_load = value & 0x3F,
+            0xFF21 => {
+                self.ch4.initial_volume = (value >> 4) & 0x0F;
+                self.ch4.env_add_mode = value & 0x08 != 0;
+                self.ch4.env_period = value & 0x07;
+                
+                self.ch4.dac_enabled = value & 0xF8 != 0;
+                if !self.ch4.dac_enabled {
+                    self.ch4.enabled = false;
+                }
+            }
+            0xFF22 => {
+                self.ch4.divisor_code = value & 0x07;
+                self.ch4.width_mode = (value & 0x08) != 0;
+                self.ch4.clock_shift = (value >> 4) & 0x0F;
+            }
+            0xFF23 => {
+                self.ch4.length_enable = value & 0x40 != 0;
+                if value & 0x80 != 0 {
+                    if self.ch4.dac_enabled {
+                        self.ch4.enabled = true;
+                    }
+
+                    if self.ch4.length_timer == 0 {
+                        self.ch4.length_timer = 64 - self.ch4.length_load;
+                    }
+
+                    self.ch4.env_timer = self.ch4.env_period;
+                    self.ch4.current_volume = self.ch4.initial_volume;
+                    self.ch4.lfsr = 0x7FFF;
+                    self.ch4.freq_timer =
+                        DIVISOR_TABLE[self.ch4.divisor_code as usize] << self.ch4.clock_shift;
+                }
+            }
             0xFF1A => {
                 self.ch3.dac_enabled = (value & 0x80) != 0;
             }
@@ -244,6 +295,7 @@ impl Apu {
                     self.ch1.clock_length();
                     self.ch2.clock_length();
                     self.ch3.clock_length();
+                    self.ch4.clock_length();
                 }
                 if self.frame_sequencer_step == 2 || self.frame_sequencer_step == 6 {
                     self.ch1.clock_sweep();
@@ -251,6 +303,7 @@ impl Apu {
                 if self.frame_sequencer_step == 7 {
                     self.ch1.clock_envelope();
                     self.ch2.clock_envelope();
+                    self.ch4.clock_envelope();
                 }
 
                 self.frame_sequencer_step = (self.frame_sequencer_step + 1) & 7;
@@ -279,6 +332,15 @@ impl Apu {
                     self.blip_left.add_delta(self.t_clock, amp_delta);
                 }
                 if self.nr51 & 0x04 != 0 {
+                    self.blip_right.add_delta(self.t_clock, amp_delta);
+                }
+            }
+
+            if let Some(amp_delta) = self.ch4.tick() {
+                if self.nr51 & 0x80 != 0 {
+                    self.blip_left.add_delta(self.t_clock, amp_delta);
+                }
+                if self.nr51 & 0x08 != 0 {
                     self.blip_right.add_delta(self.t_clock, amp_delta);
                 }
             }
@@ -609,6 +671,120 @@ impl WaveChannel {
 
             if self.length_timer == 0 {
                 self.enabled = false;
+            }
+        }
+    }
+}
+
+struct NoiseChannel {
+    length_load: u8,
+    length_timer: u8,
+    length_enable: bool,
+    initial_volume: u8,
+    env_add_mode: bool,
+    env_period: u8,
+    env_timer: u8,
+    current_volume: u8,
+    clock_shift: u8,
+    width_mode: bool,
+    divisor_code: u8,
+    enabled: bool,
+    dac_enabled: bool,
+    freq_timer: u16,
+    lfsr: u16,
+    last_amp: i32,
+}
+
+impl NoiseChannel {
+    pub fn new() -> Self {
+        Self {
+            length_load: 0,
+            length_timer: 0,
+            length_enable: false,
+            initial_volume: 0,
+            env_add_mode: false,
+            env_period: 0,
+            env_timer: 0,
+            current_volume: 0,
+            clock_shift: 0,
+            width_mode: false,
+            divisor_code: 0,
+            enabled: false,
+            dac_enabled: false,
+            freq_timer: 0,
+            lfsr: 0,
+            last_amp: 0,
+        }
+    }
+
+    fn tick(&mut self) -> Option<i32> {
+        if self.freq_timer > 0 {
+            self.freq_timer -= 1;
+        }
+
+        if self.freq_timer == 0 {
+            self.freq_timer = DIVISOR_TABLE[self.divisor_code as usize] << self.clock_shift;
+
+            let xor_result = (self.lfsr & 0x01) ^ ((self.lfsr >> 1) & 0x01);
+            self.lfsr = (self.lfsr >> 1) | (xor_result << 14);
+
+            if self.width_mode {
+                self.lfsr = self.lfsr | (xor_result << 6);
+            }
+        }
+
+        let amplitude: i32 = if self.enabled && self.dac_enabled {
+            if self.lfsr & 0x01 == 0 {
+                self.current_volume as i32 * 256
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        if amplitude != self.last_amp {
+            let amp_delta = amplitude - self.last_amp;
+            self.last_amp = amplitude;
+
+            return Some(amp_delta);
+        }
+
+        None
+    }
+
+    fn clock_length(&mut self) {
+        if self.length_enable && self.length_timer > 0 {
+            self.length_timer -= 1;
+
+            if self.length_timer == 0 {
+                self.enabled = false;
+            }
+        }
+    }
+
+    fn clock_envelope(&mut self) {
+        if self.env_period == 0 {
+            return;
+        }
+
+        if self.env_timer > 0 {
+            self.env_timer -= 1;
+        }
+
+        if self.env_timer == 0 {
+            self.env_timer = self.env_period;
+
+            if self.env_add_mode {
+                if self.current_volume < 15 {
+                    self.current_volume += 1;
+                }
+            }
+
+            if !self.env_add_mode {
+                if self.current_volume > 0 {
+                    self.current_volume -= 1;
+                }
             }
         }
     }
