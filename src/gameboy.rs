@@ -29,6 +29,8 @@ impl Gameboy {
         let mut window = Window::new("Rustyboy", WIDTH, HEIGHT, window_options)
             .unwrap_or_else(|e| panic!("{}", e));
 
+        let mut frame_count = 0u32;
+        let mut last_result = 0xFFu8;
         while window.is_open() && !window.is_key_down(Key::Escape) {
             let cycles_per_frame = 17556; // ~4.19 MHz / 60 FPS
             let mut cycles_run = 0;
@@ -37,6 +39,21 @@ impl Gameboy {
             }
             let samples = self.cpu.bus.apu.end_frame();
             let _ = self.sample_sender.try_send(samples);
+
+            frame_count += 1;
+            // Debug: check Blargg test result at 0xA000
+            let result = self.cpu.bus.read_byte(0xA000);
+            if result != last_result {
+                last_result = result;
+                let mut text = String::new();
+                for i in 0..200 {
+                    let ch = self.cpu.bus.read_byte(0xA004 + i);
+                    if ch == 0 { break; }
+                    text.push(ch as char);
+                }
+                eprintln!("Frame {}: Blargg code={:#04X} text={}", frame_count, result, text);
+            }
+
             window
                 .update_with_buffer(&self.cpu.bus.ppu.frame_buffer, WIDTH, HEIGHT)
                 .unwrap();

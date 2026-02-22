@@ -93,9 +93,8 @@ impl Bus {
             INTERRUPT_ENABLE => self.ie & 0x1F,
             0xFF40..=0xFF4B => self.ppu.read_byte(addr),
             _ => {
-                // For now, return 0 for unhandled registers
-                // This prevents the debug spam and allows the test to continue
-                0
+                // Unmapped I/O registers read 0xFF on DMG (data bus floats high)
+                0xFF
             }
         }
     }

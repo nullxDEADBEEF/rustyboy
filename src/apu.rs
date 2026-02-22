@@ -50,15 +50,23 @@ impl Apu {
     }
 
     pub fn read_byte(&self, addr: u16) -> u8 {
-        if !self.enabled && addr != 0xFF26 && !(0xFF30..=0xFF3F).contains(&addr) {
-            return 0xFF; // APU disabled, most registers read as 0xFF
-        }
-
         match addr {
             0xFF10 => {
                 0x80 | (self.ch1.sweep_period << 4)
                     | ((self.ch1.sweep_negate as u8) << 3)
                     | self.ch1.sweep_shift
+            }
+            0xFF11 => {
+                (self.ch1.duty_cycle << 6) | 0x3F 
+            }
+            0xFF12 => {
+                (self.ch1.initial_volume << 4) | ((self.ch1.env_add_mode as u8) << 3) | self.ch1.env_period
+            }
+            0xFF13 => {
+                0xFF
+            }
+            0xFF14 => {
+                0xBF | ((self.ch1.length_enable as u8) << 6)
             }
             0xFF16 => (self.ch2.duty_cycle << 6) | 0x3F,
             0xFF17 => {
@@ -94,25 +102,47 @@ impl Apu {
             0xFF1C => 0x9F | (self.ch3.volume_code << 5),
             0xFF1D => 0xFF,
             0xFF1E => 0xBF | ((self.ch3.length_enable as u8) << 6),
-            0xFF30..=0xFF3F => self.ch3.wave_ram[(addr - 0xFF30) as usize],
+            0xFF30..=0xFF3F => {
+                if self.ch3.enabled {
+                    // DMG: reading wave RAM while CH3 is playing returns the byte
+                    // at the position CH3 is currently reading, but only if the
+                    // read aligns with the wave channel's sample fetch cycle
+                    if self.t_clock == self.ch3.sample_time {
+                        self.ch3.wave_ram[self.ch3.position as usize / 2]
+                    } else {
+                        0xFF
+                    }
+                } else {
+                    self.ch3.wave_ram[(addr - 0xFF30) as usize]
+                }
+            }
             _ => 0xFF,
         }
     }
 
     pub fn write_byte(&mut self, addr: u16, value: u8) {
-        if !self.enabled && addr != 0xFF26 && !(0xFF30..=0xFF3F).contains(&addr) {
-            return; // APU disabled, ignore writes except power and wave RAM
+        // DMG: length registers (NRx1) can be written while APU is off
+        let is_length_reg = matches!(addr, 0xFF11 | 0xFF16 | 0xFF1B | 0xFF20);
+        if !self.enabled && addr != 0xFF26 && !(0xFF30..=0xFF3F).contains(&addr) && !is_length_reg
+        {
+            return;
         }
 
         match addr {
             0xFF10 => {
+                let was_negate = self.ch1.sweep_negate;
                 self.ch1.sweep_period = (value >> 4) & 0x07;
                 self.ch1.sweep_negate = value & 0x08 != 0;
                 self.ch1.sweep_shift = value & 0x07;
+                // Clearing negate after it was used in a calculation disables channel
+                if was_negate && !self.ch1.sweep_negate && self.ch1.sweep_has_negated {
+                    self.ch1.enabled = false;
+                }
             }
             0xFF11 => {
                 self.ch1.duty_cycle = (value >> 6) & 0x03;
                 self.ch1.length_load = value & 0x3F;
+                self.ch1.length_timer = 64 - self.ch1.length_load;
             }
             0xFF12 => {
                 self.ch1.initial_volume = (value >> 4) & 0x0F;
@@ -127,10 +157,22 @@ impl Apu {
                 self.ch1.freq_low = value;
             }
             0xFF14 => {
+                let was_length_enabled = self.ch1.length_enable;
                 self.ch1.length_enable = value & 0x40 != 0;
                 self.ch1.freq_high = value & 0x07;
-                if value & 0x80 != 0 && self.ch1.dac_enabled {
-                    self.ch1.enabled = true;
+
+                // Extra length clocking on enable transition (DMG quirk)
+                let in_first_half = self.frame_sequencer_step % 2 != 0;
+                if !was_length_enabled && self.ch1.length_enable && in_first_half {
+                    self.ch1.clock_length();
+                }
+
+                if value & 0x80 != 0 {
+                    let length_was_zero = self.ch1.length_timer == 0;
+
+                    if self.ch1.dac_enabled {
+                        self.ch1.enabled = true;
+                    }
                     self.ch1.current_volume = self.ch1.initial_volume;
                     self.ch1.env_timer = self.ch1.env_period;
 
@@ -150,22 +192,34 @@ impl Apu {
                         8
                     };
 
-                    if self.ch1.sweep_period != 0 || self.ch1.sweep_shift != 0 {
-                        self.ch1.sweep_enabled = true;
-                    }
+                    self.ch1.sweep_enabled =
+                        self.ch1.sweep_period != 0 || self.ch1.sweep_shift != 0;
+                    self.ch1.sweep_has_negated = false;
 
                     if self.ch1.sweep_shift != 0 {
-                        let new_freq =
-                            self.ch1.shadow_freq + (self.ch1.shadow_freq >> self.ch1.sweep_shift);
+                        let new_freq = if self.ch1.sweep_negate {
+                            self.ch1.sweep_has_negated = true;
+                            self.ch1
+                                .shadow_freq
+                                .wrapping_sub(self.ch1.shadow_freq >> self.ch1.sweep_shift)
+                        } else {
+                            self.ch1.shadow_freq + (self.ch1.shadow_freq >> self.ch1.sweep_shift)
+                        };
                         if new_freq > 2047 {
                             self.ch1.enabled = false;
                         }
+                    }
+
+                    // Extra clock when trigger unfreezes length (reloaded from 0)
+                    if length_was_zero && self.ch1.length_enable && in_first_half {
+                        self.ch1.clock_length();
                     }
                 }
             }
             0xFF16 => {
                 self.ch2.duty_cycle = (value >> 6) & 0x03;
                 self.ch2.length_load = value & 0x3F;
+                self.ch2.length_timer = 64 - self.ch2.length_load;
             }
             0xFF17 => {
                 self.ch2.initial_volume = (value >> 4) & 0x0F;
@@ -180,10 +234,21 @@ impl Apu {
                 self.ch2.freq_low = value;
             }
             0xFF19 => {
+                let was_length_enabled = self.ch2.length_enable;
                 self.ch2.length_enable = value & 0x40 != 0;
                 self.ch2.freq_high = value & 0x07;
-                if value & 0x80 != 0 && self.ch2.dac_enabled {
-                    self.ch2.enabled = true;
+
+                let in_first_half = self.frame_sequencer_step % 2 != 0;
+                if !was_length_enabled && self.ch2.length_enable && in_first_half {
+                    self.ch2.clock_length();
+                }
+
+                if value & 0x80 != 0 {
+                    let length_was_zero = self.ch2.length_timer == 0;
+
+                    if self.ch2.dac_enabled {
+                        self.ch2.enabled = true;
+                    }
                     self.ch2.current_volume = self.ch2.initial_volume;
                     self.ch2.env_timer = self.ch2.env_period;
 
@@ -194,9 +259,16 @@ impl Apu {
                     let freq = (self.ch2.freq_high as u16) << 8 | self.ch2.freq_low as u16;
                     self.ch2.freq_timer = (2048 - freq) * 4;
                     self.ch2.duty_position = 0;
+
+                    if length_was_zero && self.ch2.length_enable && in_first_half {
+                        self.ch2.clock_length();
+                    }
                 }
             }
-            0xFF20 => self.ch4.length_load = value & 0x3F,
+            0xFF20 => {
+                self.ch4.length_load = value & 0x3F;
+                self.ch4.length_timer = 64 - self.ch4.length_load;
+            }
             0xFF21 => {
                 self.ch4.initial_volume = (value >> 4) & 0x0F;
                 self.ch4.env_add_mode = value & 0x08 != 0;
@@ -213,14 +285,23 @@ impl Apu {
                 self.ch4.clock_shift = (value >> 4) & 0x0F;
             }
             0xFF23 => {
+                let was_length_enabled = self.ch4.length_enable;
                 self.ch4.length_enable = value & 0x40 != 0;
+
+                let in_first_half = self.frame_sequencer_step % 2 != 0;
+                if !was_length_enabled && self.ch4.length_enable && in_first_half {
+                    self.ch4.clock_length();
+                }
+
                 if value & 0x80 != 0 {
+                    let length_was_zero = self.ch4.length_timer == 0;
+
                     if self.ch4.dac_enabled {
                         self.ch4.enabled = true;
                     }
 
                     if self.ch4.length_timer == 0 {
-                        self.ch4.length_timer = 64 - self.ch4.length_load;
+                        self.ch4.length_timer = 64;
                     }
 
                     self.ch4.env_timer = self.ch4.env_period;
@@ -228,13 +309,21 @@ impl Apu {
                     self.ch4.lfsr = 0x7FFF;
                     self.ch4.freq_timer =
                         DIVISOR_TABLE[self.ch4.divisor_code as usize] << self.ch4.clock_shift;
+
+                    if length_was_zero && self.ch4.length_enable && in_first_half {
+                        self.ch4.clock_length();
+                    }
                 }
             }
             0xFF1A => {
                 self.ch3.dac_enabled = (value & 0x80) != 0;
+                if !self.ch3.dac_enabled {
+                    self.ch3.enabled = false;
+                }
             }
             0xFF1B => {
                 self.ch3.length_load = value as u16;
+                self.ch3.length_timer = 256 - self.ch3.length_load;
             }
             0xFF1C => {
                 self.ch3.volume_code = (value >> 5) & 0x03;
@@ -243,21 +332,63 @@ impl Apu {
                 self.ch3.freq_low = value;
             }
             0xFF1E => {
+                let was_length_enabled = self.ch3.length_enable;
                 self.ch3.length_enable = value & 0x40 != 0;
                 self.ch3.freq_high = value & 0x07;
 
+                let in_first_half = self.frame_sequencer_step % 2 != 0;
+                if !was_length_enabled && self.ch3.length_enable && in_first_half {
+                    self.ch3.clock_length();
+                }
+
                 if value & 0x80 != 0 {
+                    // DMG wave corruption: if retriggered while playing and the trigger
+                    // coincides with the wave channel reading a sample, wave RAM gets corrupted
+                    if self.ch3.enabled && self.ch3.sample_time != u32::MAX {
+                        let freq =
+                            (self.ch3.freq_high as u16) << 8 | self.ch3.freq_low as u16;
+                        let period = ((2048u16).saturating_sub(freq)) * 2;
+                        let time_since_read =
+                            self.t_clock.wrapping_sub(self.ch3.sample_time);
+                        if period > 0 && time_since_read % period as u32 == 0 {
+                            let pos = self.ch3.position as usize;
+                            if pos < 4 {
+                                self.ch3.wave_ram[0] =
+                                    self.ch3.wave_ram[pos / 2];
+                            } else {
+                                let src = ((pos & !3) / 2) % 16;
+                                let bytes: [u8; 4] = [
+                                    self.ch3.wave_ram[src % 16],
+                                    self.ch3.wave_ram[(src + 1) % 16],
+                                    self.ch3.wave_ram[(src + 2) % 16],
+                                    self.ch3.wave_ram[(src + 3) % 16],
+                                ];
+                                self.ch3.wave_ram[0] = bytes[0];
+                                self.ch3.wave_ram[1] = bytes[1];
+                                self.ch3.wave_ram[2] = bytes[2];
+                                self.ch3.wave_ram[3] = bytes[3];
+                            }
+                        }
+                    }
+
+                    let length_was_zero = self.ch3.length_timer == 0;
+
                     if self.ch3.dac_enabled {
                         self.ch3.enabled = true;
                     }
 
                     if self.ch3.length_timer == 0 {
-                        self.ch3.length_timer = 256 - self.ch3.length_load;
+                        self.ch3.length_timer = 256;
                     }
 
                     let freq = (self.ch3.freq_high as u16) << 8 | self.ch3.freq_low as u16;
-                    self.ch3.freq_timer = (2048 - freq) * 2;
+                    self.ch3.freq_timer = (2048 - freq) * 2 + 6; // +6 T-cycle trigger delay
                     self.ch3.position = 0;
+                    self.ch3.sample_time = u32::MAX; // no sample read yet
+
+                    if length_was_zero && self.ch3.length_enable && in_first_half {
+                        self.ch3.clock_length();
+                    }
                 }
             }
             0xFF24 => {
@@ -271,6 +402,26 @@ impl Apu {
                     self.enabled = false;
                     self.nr50 = 0x00;
                     self.nr51 = 0x00;
+
+                    let ch1_length = self.ch1.length_timer;
+                    let ch2_length = self.ch2.length_timer;
+                    let ch3_length = self.ch3.length_timer;
+                    let ch4_length = self.ch4.length_timer;
+                    let wave_ram = self.ch3.wave_ram;
+
+                    self.ch1 = SquareChannel::new();
+                    self.ch2 = SquareChannel::new();
+                    self.ch3 = WaveChannel::new();
+                    self.ch4 = NoiseChannel::new();
+
+                    self.ch1.length_timer = ch1_length;
+                    self.ch2.length_timer = ch2_length;
+                    self.ch3.length_timer = ch3_length;
+                    self.ch4.length_timer = ch4_length;
+                    self.ch3.wave_ram = wave_ram;
+
+                    self.frame_sequencer_counter = 0;
+                    self.frame_sequencer_step = 0;
                 } else {
                     self.enabled = true;
                 }
@@ -285,8 +436,11 @@ impl Apu {
         let should_advance_frame_sequencer_step = 4_194_304 / 512;
 
         for _ in 0..t_cycles {
-            self.frame_sequencer_counter += 1;
             self.t_clock += 1;
+
+            if self.enabled {
+                self.frame_sequencer_counter += 1;
+            }
 
             if self.frame_sequencer_counter == should_advance_frame_sequencer_step {
                 self.frame_sequencer_counter = 0;
@@ -327,7 +481,7 @@ impl Apu {
                 }
             }
 
-            if let Some(amp_delta) = self.ch3.tick() {
+            if let Some(amp_delta) = self.ch3.tick(self.t_clock) {
                 if self.nr51 & 0x40 != 0 {
                     self.blip_left.add_delta(self.t_clock, amp_delta);
                 }
@@ -391,7 +545,7 @@ mod tests {
         // power off should zero registers
         apu.write_byte(0xFF26, 0x00);
         assert_eq!(apu.read_byte(0xFF26) & 0x80, 0x00);
-        assert_eq!(apu.read_byte(0xFF24), 0xFF); // disabled -> reads as 0xFF
+        assert_eq!(apu.read_byte(0xFF24), 0x00); // disabled -> NR50 zeroed, mask $00
     }
 
     #[test]
@@ -440,6 +594,56 @@ mod tests {
         // duty 50% position 4 = 1, volume 15 → amplitude = 1 * 15 * 256 = 3840
         assert_eq!(apu.ch2.last_amp, 3840);
     }
+
+    #[test]
+    fn blargg_01_register_roundtrip() {
+        let masks: [(u16, u8); 22] = [
+            (0xFF10, 0x80), (0xFF11, 0x3F), (0xFF12, 0x00), (0xFF13, 0xFF), (0xFF14, 0xBF),
+            (0xFF15, 0xFF), (0xFF16, 0x3F), (0xFF17, 0x00), (0xFF18, 0xFF), (0xFF19, 0xBF),
+            (0xFF1A, 0x7F), (0xFF1B, 0xFF), (0xFF1C, 0x9F), (0xFF1D, 0xFF), (0xFF1E, 0xBF),
+            (0xFF1F, 0xFF), (0xFF20, 0xFF), (0xFF21, 0x00), (0xFF22, 0x00), (0xFF23, 0xBF),
+            (0xFF24, 0x00), (0xFF25, 0x00),
+            // NR52 skipped by the test
+            // Wave RAM tested separately with mask 0x00
+        ];
+
+        let mut apu = Apu::new(44100);
+        apu.write_byte(0xFF26, 0x80); // power on
+
+        for d in 0..=255u8 {
+            for &(addr, mask) in &masks {
+                apu.write_byte(addr, d);
+                let expected = mask | d;
+                let actual = apu.read_byte(addr);
+                assert_eq!(
+                    actual, expected,
+                    "Register {:#06X} with d={:#04X}: expected {:#04X}, got {:#04X}",
+                    addr, d, expected, actual
+                );
+                // Mute and disable wave between each (like the test does)
+                apu.write_byte(0xFF25, 0x00);
+                apu.write_byte(0xFF1A, 0x00);
+            }
+        }
+    }
+
+    #[test]
+    fn blargg_01_wave_ram_roundtrip() {
+        let mut apu = Apu::new(44100);
+        apu.write_byte(0xFF26, 0x80);
+
+        for d in 0..=255u8 {
+            for addr in 0xFF30..=0xFF3Fu16 {
+                apu.write_byte(addr, d);
+                let actual = apu.read_byte(addr);
+                assert_eq!(
+                    actual, d,
+                    "Wave RAM {:#06X} with d={:#04X}: expected {:#04X}, got {:#04X}",
+                    addr, d, d, actual
+                );
+            }
+        }
+    }
 }
 
 struct SquareChannel {
@@ -466,7 +670,8 @@ struct SquareChannel {
     sweep_negate: bool,
     sweep_timer: u8,
     sweep_enabled: bool,
-    shadow_freq: u16, // internal copy of frequency used for sweep calculations
+    sweep_has_negated: bool, // set when negate mode is used in a calculation
+    shadow_freq: u16,        // internal copy of frequency used for sweep calculations
 }
 
 impl SquareChannel {
@@ -495,6 +700,7 @@ impl SquareChannel {
             sweep_negate: false,
             sweep_timer: 0,
             sweep_enabled: false,
+            sweep_has_negated: false,
             shadow_freq: 0,
         }
     }
@@ -564,16 +770,28 @@ impl SquareChannel {
     }
 
     fn clock_sweep(&mut self) {
-        if self.sweep_enabled && self.sweep_period > 0 {
-            if self.sweep_timer > 0 {
-                self.sweep_timer -= 1;
-            }
+        if !self.sweep_enabled {
+            return;
+        }
 
-            if self.sweep_timer == 0 {
-                self.sweep_timer = self.sweep_period;
+        if self.sweep_timer > 0 {
+            self.sweep_timer -= 1;
+        }
+
+        if self.sweep_timer == 0 {
+            self.sweep_timer = if self.sweep_period > 0 {
+                self.sweep_period
+            } else {
+                8
+            };
+
+            if self.sweep_period > 0 {
+                if self.sweep_negate {
+                    self.sweep_has_negated = true;
+                }
 
                 let new_freq = if self.sweep_negate {
-                    self.shadow_freq - (self.shadow_freq >> self.sweep_shift)
+                    self.shadow_freq.wrapping_sub(self.shadow_freq >> self.sweep_shift)
                 } else {
                     self.shadow_freq + (self.shadow_freq >> self.sweep_shift)
                 };
@@ -584,6 +802,16 @@ impl SquareChannel {
                     self.shadow_freq = new_freq;
                     self.freq_low = (new_freq & 0xFF) as u8;
                     self.freq_high = ((new_freq >> 8) & 0x07) as u8;
+
+                    // Second overflow check with updated frequency
+                    let second_freq = if self.sweep_negate {
+                        self.shadow_freq.wrapping_sub(self.shadow_freq >> self.sweep_shift)
+                    } else {
+                        self.shadow_freq + (self.shadow_freq >> self.sweep_shift)
+                    };
+                    if second_freq > 2047 {
+                        self.enabled = false;
+                    }
                 }
             }
         }
@@ -604,6 +832,7 @@ struct WaveChannel {
     sample_buffer: u8,
     wave_ram: [u8; 16],
     last_amp: i32,
+    sample_time: u32, // T-cycle when wave RAM was last accessed by the channel
 }
 
 impl WaveChannel {
@@ -622,10 +851,11 @@ impl WaveChannel {
             sample_buffer: 0,
             wave_ram: [0; 16],
             last_amp: 0,
+            sample_time: 0,
         }
     }
 
-    fn tick(&mut self) -> Option<i32> {
+    fn tick(&mut self, t_clock: u32) -> Option<i32> {
         if self.freq_timer > 0 {
             self.freq_timer -= 1;
         }
@@ -634,6 +864,7 @@ impl WaveChannel {
             let freq = (self.freq_high as u16) << 8 | self.freq_low as u16;
             self.freq_timer = (2048 - freq) * 2;
             self.position = (self.position + 1) & 31;
+            self.sample_time = t_clock; // record when wave RAM was accessed
 
             let nibble = self.wave_ram[self.position as usize / 2];
             if self.position % 2 == 0 {
