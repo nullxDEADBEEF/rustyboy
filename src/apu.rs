@@ -6,6 +6,10 @@ pub struct Apu {
     nr51: u8,      // sound panning register
     ch1: SquareChannel,
     ch2: SquareChannel,
+    ch3: WaveChannel,
+
+    frame_sequencer_counter: u32,
+    frame_sequencer_step: u8,
 
     blip_left: BlipBuf,
     blip_right: BlipBuf,
@@ -27,6 +31,9 @@ impl Apu {
             nr51: 0x00,
             ch1: SquareChannel::new(),
             ch2: SquareChannel::new(),
+            ch3: WaveChannel::new(),
+            frame_sequencer_counter: 0,
+            frame_sequencer_step: 0,
             blip_left: BlipBuf::new(sample_rate / 60 + 100), // one frame plus padding
             blip_right: BlipBuf::new(sample_rate / 60 + 100),
             t_clock: 0,
@@ -44,6 +51,11 @@ impl Apu {
         }
 
         match addr {
+            0xFF10 => {
+                0x80 | (self.ch1.sweep_period << 4)
+                    | ((self.ch1.sweep_negate as u8) << 3)
+                    | self.ch1.sweep_shift
+            }
             0xFF16 => (self.ch2.duty_cycle << 6) | 0x3F,
             0xFF17 => {
                 (self.ch2.initial_volume << 4)
@@ -54,7 +66,18 @@ impl Apu {
             0xFF19 => 0xBF | ((self.ch2.length_enable as u8) << 6),
             0xFF24 => self.nr50,
             0xFF25 => self.nr51,
-            0xFF26 => 0x70 | ((self.enabled as u8) << 7),
+            0xFF26 => {
+                0x70 | ((self.enabled as u8) << 7)
+                    | ((self.ch3.enabled as u8) << 2)
+                    | ((self.ch2.enabled as u8) << 1)
+                    | (self.ch1.enabled as u8)
+            }
+            0xFF1A => 0x7F | ((self.ch3.dac_enabled as u8) << 7),
+            0xFF1B => 0xFF,
+            0xFF1C => 0x9F | (self.ch3.volume_code << 5),
+            0xFF1D => 0xFF,
+            0xFF1E => 0xBF | ((self.ch3.length_enable as u8) << 6),
+            0xFF30..=0xFF3F => self.ch3.wave_ram[(addr - 0xFF30) as usize],
             _ => 0xFF,
         }
     }
@@ -65,6 +88,64 @@ impl Apu {
         }
 
         match addr {
+            0xFF10 => {
+                self.ch1.sweep_period = (value >> 4) & 0x07;
+                self.ch1.sweep_negate = value & 0x08 != 0;
+                self.ch1.sweep_shift = value & 0x07;
+            }
+            0xFF11 => {
+                self.ch1.duty_cycle = (value >> 6) & 0x03;
+                self.ch1.length_load = value & 0x3F;
+            }
+            0xFF12 => {
+                self.ch1.initial_volume = (value >> 4) & 0x0F;
+                self.ch1.env_add_mode = value & 0x08 != 0;
+                self.ch1.env_period = value & 0x07;
+                self.ch1.dac_enabled = value & 0xF8 != 0;
+                if !self.ch1.dac_enabled {
+                    self.ch1.enabled = false;
+                }
+            }
+            0xFF13 => {
+                self.ch1.freq_low = value;
+            }
+            0xFF14 => {
+                self.ch1.length_enable = value & 0x40 != 0;
+                self.ch1.freq_high = value & 0x07;
+                if value & 0x80 != 0 && self.ch1.dac_enabled {
+                    self.ch1.enabled = true;
+                    self.ch1.current_volume = self.ch1.initial_volume;
+                    self.ch1.env_timer = self.ch1.env_period;
+
+                    if self.ch1.length_timer == 0 {
+                        self.ch1.length_timer = 64;
+                    }
+
+                    let freq = (self.ch1.freq_high as u16) << 8 | self.ch1.freq_low as u16;
+                    self.ch1.freq_timer = (2048 - freq) * 4;
+                    self.ch1.duty_position = 0;
+
+                    self.ch1.shadow_freq = freq;
+
+                    self.ch1.sweep_timer = if self.ch1.sweep_period > 0 {
+                        self.ch1.sweep_period
+                    } else {
+                        8
+                    };
+
+                    if self.ch1.sweep_period != 0 || self.ch1.sweep_shift != 0 {
+                        self.ch1.sweep_enabled = true;
+                    }
+
+                    if self.ch1.sweep_shift != 0 {
+                        let new_freq =
+                            self.ch1.shadow_freq + (self.ch1.shadow_freq >> self.ch1.sweep_shift);
+                        if new_freq > 2047 {
+                            self.ch1.enabled = false;
+                        }
+                    }
+                }
+            }
             0xFF16 => {
                 self.ch2.duty_cycle = (value >> 6) & 0x03;
                 self.ch2.length_load = value & 0x3F;
@@ -87,9 +168,45 @@ impl Apu {
                 if value & 0x80 != 0 && self.ch2.dac_enabled {
                     self.ch2.enabled = true;
                     self.ch2.current_volume = self.ch2.initial_volume;
+                    self.ch2.env_timer = self.ch2.env_period;
+
+                    if self.ch2.length_timer == 0 {
+                        self.ch2.length_timer = 64;
+                    }
+
                     let freq = (self.ch2.freq_high as u16) << 8 | self.ch2.freq_low as u16;
                     self.ch2.freq_timer = (2048 - freq) * 4;
                     self.ch2.duty_position = 0;
+                }
+            }
+            0xFF1A => {
+                self.ch3.dac_enabled = (value & 0x80) != 0;
+            }
+            0xFF1B => {
+                self.ch3.length_load = value as u16;
+            }
+            0xFF1C => {
+                self.ch3.volume_code = (value >> 5) & 0x03;
+            }
+            0xFF1D => {
+                self.ch3.freq_low = value;
+            }
+            0xFF1E => {
+                self.ch3.length_enable = value & 0x40 != 0;
+                self.ch3.freq_high = value & 0x07;
+
+                if value & 0x80 != 0 {
+                    if self.ch3.dac_enabled {
+                        self.ch3.enabled = true;
+                    }
+
+                    if self.ch3.length_timer == 0 {
+                        self.ch3.length_timer = 256 - self.ch3.length_load;
+                    }
+
+                    let freq = (self.ch3.freq_high as u16) << 8 | self.ch3.freq_low as u16;
+                    self.ch3.freq_timer = (2048 - freq) * 2;
+                    self.ch3.position = 0;
                 }
             }
             0xFF24 => {
@@ -107,21 +224,61 @@ impl Apu {
                     self.enabled = true;
                 }
             }
+            0xFF30..=0xFF3F => self.ch3.wave_ram[(addr - 0xFF30) as usize] = value,
             _ => {}
         }
     }
 
     pub fn step(&mut self, cycles: u8) {
         let t_cycles = cycles * 4;
+        let should_advance_frame_sequencer_step = 4_194_304 / 512;
 
         for _ in 0..t_cycles {
+            self.frame_sequencer_counter += 1;
             self.t_clock += 1;
+
+            if self.frame_sequencer_counter == should_advance_frame_sequencer_step {
+                self.frame_sequencer_counter = 0;
+
+                if self.frame_sequencer_step % 2 == 0 {
+                    self.ch1.clock_length();
+                    self.ch2.clock_length();
+                    self.ch3.clock_length();
+                }
+                if self.frame_sequencer_step == 2 || self.frame_sequencer_step == 6 {
+                    self.ch1.clock_sweep();
+                }
+                if self.frame_sequencer_step == 7 {
+                    self.ch1.clock_envelope();
+                    self.ch2.clock_envelope();
+                }
+
+                self.frame_sequencer_step = (self.frame_sequencer_step + 1) & 7;
+            }
+
+            if let Some(amp_delta) = self.ch1.tick() {
+                if self.nr51 & 0x10 != 0 {
+                    self.blip_left.add_delta(self.t_clock, amp_delta);
+                }
+                if self.nr51 & 0x01 != 0 {
+                    self.blip_right.add_delta(self.t_clock, amp_delta);
+                }
+            }
 
             if let Some(amp_delta) = self.ch2.tick() {
                 if self.nr51 & 0x20 != 0 {
                     self.blip_left.add_delta(self.t_clock, amp_delta);
                 }
                 if self.nr51 & 0x02 != 0 {
+                    self.blip_right.add_delta(self.t_clock, amp_delta);
+                }
+            }
+
+            if let Some(amp_delta) = self.ch3.tick() {
+                if self.nr51 & 0x40 != 0 {
+                    self.blip_left.add_delta(self.t_clock, amp_delta);
+                }
+                if self.nr51 & 0x04 != 0 {
                     self.blip_right.add_delta(self.t_clock, amp_delta);
                 }
             }
@@ -226,9 +383,11 @@ mod tests {
 struct SquareChannel {
     duty_cycle: u8,
     length_load: u8,
+    length_timer: u8,
     initial_volume: u8,
     env_add_mode: bool,
     env_period: u8,
+    env_timer: u8,
     freq_low: u8,
     freq_high: u8,
     length_enable: bool,
@@ -239,6 +398,13 @@ struct SquareChannel {
     duty_position: u8,
     current_volume: u8,
     last_amp: i32,
+
+    sweep_period: u8,
+    sweep_shift: u8,
+    sweep_negate: bool,
+    sweep_timer: u8,
+    sweep_enabled: bool,
+    shadow_freq: u16, // internal copy of frequency used for sweep calculations
 }
 
 impl SquareChannel {
@@ -246,9 +412,11 @@ impl SquareChannel {
         Self {
             duty_cycle: 0,
             length_load: 0,
+            length_timer: 0,
             initial_volume: 0,
             env_add_mode: false,
             env_period: 0,
+            env_timer: 0,
             freq_low: 0,
             freq_high: 0,
             length_enable: false,
@@ -259,6 +427,13 @@ impl SquareChannel {
             duty_position: 0,
             current_volume: 0,
             last_amp: 0,
+
+            sweep_period: 0,
+            sweep_shift: 0,
+            sweep_negate: false,
+            sweep_timer: 0,
+            sweep_enabled: false,
+            shadow_freq: 0,
         }
     }
 
@@ -288,5 +463,153 @@ impl SquareChannel {
         }
 
         None
+    }
+
+    fn clock_length(&mut self) {
+        if self.length_enable && self.length_timer > 0 {
+            self.length_timer -= 1;
+
+            if self.length_timer == 0 {
+                self.enabled = false;
+            }
+        }
+    }
+
+    fn clock_envelope(&mut self) {
+        if self.env_period == 0 {
+            return;
+        }
+
+        if self.env_timer > 0 {
+            self.env_timer -= 1;
+        }
+
+        if self.env_timer == 0 {
+            self.env_timer = self.env_period;
+
+            if self.env_add_mode {
+                if self.current_volume < 15 {
+                    self.current_volume += 1;
+                }
+            }
+
+            if !self.env_add_mode {
+                if self.current_volume > 0 {
+                    self.current_volume -= 1;
+                }
+            }
+        }
+    }
+
+    fn clock_sweep(&mut self) {
+        if self.sweep_enabled && self.sweep_period > 0 {
+            if self.sweep_timer > 0 {
+                self.sweep_timer -= 1;
+            }
+
+            if self.sweep_timer == 0 {
+                self.sweep_timer = self.sweep_period;
+
+                let new_freq = if self.sweep_negate {
+                    self.shadow_freq - (self.shadow_freq >> self.sweep_shift)
+                } else {
+                    self.shadow_freq + (self.shadow_freq >> self.sweep_shift)
+                };
+
+                if new_freq > 2047 {
+                    self.enabled = false;
+                } else if self.sweep_shift != 0 {
+                    self.shadow_freq = new_freq;
+                    self.freq_low = (new_freq & 0xFF) as u8;
+                    self.freq_high = ((new_freq >> 8) & 0x07) as u8;
+                }
+            }
+        }
+    }
+}
+
+struct WaveChannel {
+    dac_enabled: bool,
+    length_load: u16,
+    length_timer: u16,
+    length_enable: bool,
+    volume_code: u8,
+    freq_low: u8,
+    freq_high: u8,
+    enabled: bool,
+    freq_timer: u16,
+    position: u8,
+    sample_buffer: u8,
+    wave_ram: [u8; 16],
+    last_amp: i32,
+}
+
+impl WaveChannel {
+    pub fn new() -> Self {
+        Self {
+            dac_enabled: false,
+            length_load: 0,
+            length_timer: 0,
+            length_enable: false,
+            volume_code: 0,
+            freq_low: 0,
+            freq_high: 0,
+            enabled: false,
+            freq_timer: 0,
+            position: 0,
+            sample_buffer: 0,
+            wave_ram: [0; 16],
+            last_amp: 0,
+        }
+    }
+
+    fn tick(&mut self) -> Option<i32> {
+        if self.freq_timer > 0 {
+            self.freq_timer -= 1;
+        }
+
+        if self.freq_timer == 0 {
+            let freq = (self.freq_high as u16) << 8 | self.freq_low as u16;
+            self.freq_timer = (2048 - freq) * 2;
+            self.position = (self.position + 1) & 31;
+
+            let nibble = self.wave_ram[self.position as usize / 2];
+            if self.position % 2 == 0 {
+                self.sample_buffer = nibble >> 4;
+            } else {
+                self.sample_buffer = nibble & 0x0F;
+            }
+        }
+
+        let amplitude: i32 = if self.enabled && self.dac_enabled {
+            let volume_shift = match self.volume_code {
+                0 => 4, // mute (shift right 4 = effectively 0)
+                1 => 0, // 100%
+                2 => 1, // 50%
+                3 => 2, // 25%
+                _ => 4,
+            };
+            (self.sample_buffer >> volume_shift) as i32 * 256
+        } else {
+            0
+        };
+
+        if amplitude != self.last_amp {
+            let amp_delta = amplitude - self.last_amp;
+            self.last_amp = amplitude;
+            return Some(amp_delta);
+        }
+
+        None
+    }
+
+    fn clock_length(&mut self) {
+        if self.length_enable && self.length_timer > 0 {
+            self.length_timer -= 1;
+
+            if self.length_timer == 0 {
+                self.enabled = false;
+            }
+        }
     }
 }

@@ -2700,18 +2700,20 @@ mod tests {
 
     #[test]
     fn test_correct_resetting_of_flags() {
-        let mut cpu = Cpu::new(Path::new(
-            "gb-test-roms/cpu_instrs/individual/01-special.gb",
-        ));
+        let mut cpu = Cpu::new(
+            Path::new("gb-test-roms/cpu_instrs/individual/01-special.gb"),
+            44100,
+        );
         cpu.reset_flags();
         assert_eq!(0, cpu.reg.f);
     }
 
     #[test]
     fn test_correct_setting_of_flag() {
-        let mut cpu = Cpu::new(Path::new(
-            "gb-test-roms/cpu_instrs/individual/01-special.gb",
-        ));
+        let mut cpu = Cpu::new(
+            Path::new("gb-test-roms/cpu_instrs/individual/01-special.gb"),
+            44100,
+        );
         cpu.reset_flags();
         cpu.set_flag(Flags::Carry);
         assert_eq!(0x10, cpu.reg.f);
@@ -2721,18 +2723,20 @@ mod tests {
 
     #[test]
     fn test_correct_unsetting_of_flag() {
-        let mut cpu = Cpu::new(Path::new(
-            "gb-test-roms/cpu_instrs/individual/01-special.gb",
-        ));
+        let mut cpu = Cpu::new(
+            Path::new("gb-test-roms/cpu_instrs/individual/01-special.gb"),
+            44100,
+        );
         cpu.unset_flag(Flags::Zero);
         assert_eq!(0x30, cpu.reg.f);
     }
 
     #[test]
     fn test_if_flag_is_active() {
-        let cpu = Cpu::new(Path::new(
-            "gb-test-roms/cpu_instrs/individual/01-special.gb",
-        ));
+        let cpu = Cpu::new(
+            Path::new("gb-test-roms/cpu_instrs/individual/01-special.gb"),
+            44100,
+        );
         assert_eq!(true, cpu.flag_is_active(Flags::Zero));
         assert_eq!(true, cpu.flag_is_active(Flags::Carry));
         assert_eq!(true, cpu.flag_is_active(Flags::HalfCarry));
