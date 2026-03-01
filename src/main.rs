@@ -33,7 +33,7 @@ fn main() {
     };
 
     let (_channels, sample_rate, stream_config) = audio_config;
-    let sample_rate_u32: u32 = sample_rate.into();
+    let sample_rate_u32: u32 = sample_rate;
 
     // Lock-free SPSC ring buffer sized for ~100ms of stereo audio.
     // At 48kHz stereo: 48000 * 2 * 0.1 = 9600 samples.

@@ -315,7 +315,7 @@ impl Apu {
             self.ch3.run(self.prev_time, self.next_frame_time);
             self.ch4.run(self.prev_time, self.next_frame_time);
 
-            if self.frame_step % 2 == 0 {
+            if self.frame_step.is_multiple_of(2) {
                 self.ch1.step_length();
                 self.ch2.step_length();
                 self.ch3.step_length();
@@ -645,21 +645,19 @@ impl SquareChannel {
 
         if self.sweep_delay > 1 {
             self.sweep_delay -= 1;
+        } else if self.sweep_period == 0 {
+            self.sweep_delay = 8;
         } else {
-            if self.sweep_period == 0 {
-                self.sweep_delay = 8;
-            } else {
-                self.sweep_delay = self.sweep_period;
-                if self.sweep_enabled {
-                    let new_freq = self.sweep_calculate_frequency();
-                    if new_freq <= 2047 && self.sweep_shift != 0 {
-                        self.sweep_frequency = new_freq;
-                        self.frequency = new_freq;
-                        self.calculate_period();
-                    }
-                    // Second overflow check
-                    self.sweep_calculate_frequency();
+            self.sweep_delay = self.sweep_period;
+            if self.sweep_enabled {
+                let new_freq = self.sweep_calculate_frequency();
+                if new_freq <= 2047 && self.sweep_shift != 0 {
+                    self.sweep_frequency = new_freq;
+                    self.frequency = new_freq;
+                    self.calculate_period();
                 }
+                // Second overflow check
+                self.sweep_calculate_frequency();
             }
         }
     }
@@ -733,7 +731,7 @@ impl WaveChannel {
 
         while time < end_time {
             let wave_byte = self.wave_ram[self.current_wave as usize >> 1];
-            let sample = if self.current_wave % 2 == 0 {
+            let sample = if self.current_wave.is_multiple_of(2) {
                 wave_byte >> 4
             } else {
                 wave_byte & 0x0F
