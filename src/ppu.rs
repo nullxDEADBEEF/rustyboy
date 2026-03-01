@@ -118,7 +118,8 @@ impl Ppu {
     pub fn update_ly(&mut self, cycles: u8) -> u8 {
         let mut bitmask: u8 = 0;
 
-        self.ly_cycles += cycles as u16;
+        // CPU passes M-cycles; PPU timings use T-cycles (1 M-cycle = 4 T-cycles)
+        self.ly_cycles += cycles as u16 * 4;
 
         let mode_before = self.mode;
 
@@ -225,7 +226,6 @@ impl Ppu {
         let mut bg_color_ids = [0u8; 160];
 
         self.oam_scan();
-
 
         for (x, bg_color_id) in bg_color_ids.iter_mut().enumerate().take(window_width) {
             let bg_map_y: u16 = (self.scy as u16 + self.ly as u16) % 256;

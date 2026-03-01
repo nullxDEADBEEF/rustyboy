@@ -65,11 +65,11 @@ impl Cartridge {
         // allocate external RAM based on header
         let ram_bytes = match self.data[0x0149] {
             0x00 => 0,
-            0x01 => 0, // listed but unused
-            0x02 => 8 * 1024,      // 8 KB (1 bank)
-            0x03 => 32 * 1024,     // 32 KB (4 banks)
-            0x04 => 128 * 1024,    // 128 KB (16 banks)
-            0x05 => 64 * 1024,     // 64 KB (8 banks)
+            0x01 => 0,          // listed but unused
+            0x02 => 8 * 1024,   // 8 KB (1 bank)
+            0x03 => 32 * 1024,  // 32 KB (4 banks)
+            0x04 => 128 * 1024, // 128 KB (16 banks)
+            0x05 => 64 * 1024,  // 64 KB (8 banks)
             _ => 0,
         };
         self.external_ram = vec![0x00; ram_bytes];
@@ -92,7 +92,11 @@ impl Cartridge {
                     if !self.ram_enabled || self.external_ram.is_empty() {
                         return 0xFF;
                     }
-                    let bank = if self.banking_mode == 1 { self.ram_bank } else { 0 };
+                    let bank = if self.banking_mode == 1 {
+                        self.ram_bank
+                    } else {
+                        0
+                    };
                     let offset = (bank as usize) * 0x2000 + (addr as usize - 0xA000);
                     self.external_ram.get(offset).copied().unwrap_or(0xFF)
                 }
@@ -162,7 +166,11 @@ impl Cartridge {
                     }
                     0xA000..=0xBFFF => {
                         if self.ram_enabled && !self.external_ram.is_empty() {
-                            let bank = if self.banking_mode == 1 { self.ram_bank } else { 0 };
+                            let bank = if self.banking_mode == 1 {
+                                self.ram_bank
+                            } else {
+                                0
+                            };
                             let offset = (bank as usize) * 0x2000 + (addr as usize - 0xA000);
                             if let Some(cell) = self.external_ram.get_mut(offset) {
                                 *cell = value;
@@ -200,8 +208,12 @@ impl Cartridge {
                         // latch clock data
                     }
                     0xA000..=0xBFFF => {
-                        if self.ram_enabled && self.ram_bank <= 0x03 && !self.external_ram.is_empty() {
-                            let offset = (self.ram_bank as usize) * 0x2000 + (addr as usize - 0xA000);
+                        if self.ram_enabled
+                            && self.ram_bank <= 0x03
+                            && !self.external_ram.is_empty()
+                        {
+                            let offset =
+                                (self.ram_bank as usize) * 0x2000 + (addr as usize - 0xA000);
                             if let Some(cell) = self.external_ram.get_mut(offset) {
                                 *cell = value;
                             }
