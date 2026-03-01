@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::{apu::Apu, cartridge::Cartridge, ppu::Ppu, serial::Serial, timer::Timer};
+use crate::{apu::Apu, cartridge::Cartridge, joypad::Joypad, ppu::Ppu, serial::Serial, timer::Timer};
 
 // NOTE: "word" in this context means 16-bit
 
@@ -36,6 +36,7 @@ pub struct Bus {
     pub timer: Timer,
     pub ppu: Ppu,
     pub apu: Apu,
+    pub joypad: Joypad,
     rom: Cartridge,
     serial: Serial,
     // internal ram
@@ -53,6 +54,7 @@ impl Bus {
             rom: Cartridge::new(),
             ppu: Ppu::new(),
             apu: Apu::new(sample_rate),
+            joypad: Joypad::new(),
             working_ram: vec![0xFF; WRAM_SIZE as usize + 1],
             high_ram: vec![0xFF; HRAM_SIZE as usize + 1],
             ie: 0x00,
@@ -82,7 +84,7 @@ impl Bus {
             // prohibited area
             0xFEA0..=0xFEFF => 0,
             // I/O registers
-            JOYPAD => 0xFF, // TODO: implement joypad input
+            JOYPAD => self.joypad.read_byte(addr),
             SERIAL_START..=SERIAL_END => self.serial.read_byte(addr),
             TIMER_START..=TIMER_END => self.timer.read_byte(addr),
             INTERRUPT_FLAG => self.if_ & 0x1F,
@@ -126,7 +128,7 @@ impl Bus {
             // prohibited area
             0xFEA0..=0xFEFF => {}
             // I/O registers
-            JOYPAD => {}
+            JOYPAD => self.joypad.write_byte(addr, value),
             SERIAL_START..=SERIAL_END => self.serial.write_byte(addr, value),
             TIMER_START..=TIMER_END => self.timer.write_byte(addr, value),
             INTERRUPT_FLAG => self.if_ = value & 0x1F,

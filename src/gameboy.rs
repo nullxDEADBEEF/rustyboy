@@ -38,6 +38,7 @@ impl Gameboy {
         let high_water = buffer_capacity / 2;
 
         while window.is_open() && !window.is_key_down(Key::Escape) {
+            self.check_joypad_state(&window);
             let cycles_per_frame = 17556; // ~4.19 MHz / 60 FPS
             let mut cycles_run = 0u32;
             while cycles_run < cycles_per_frame {
@@ -58,5 +59,40 @@ impl Gameboy {
                 .update_with_buffer(&self.cpu.bus.ppu.frame_buffer, WIDTH, HEIGHT)
                 .unwrap();
         }
+    }
+
+    fn check_joypad_state(&mut self, window: &Window) {
+        let mut action = 0xF;
+        let mut direction = 0xF;
+
+        if window.is_key_down(Key::Z) {
+            action &= !(1 << 0)
+        }
+        if window.is_key_down(Key::X) {
+            action &= !(1 << 1)
+        }
+        if window.is_key_down(Key::Space) {
+            action &= !(1 << 2)
+        }
+        if window.is_key_down(Key::Enter) {
+            action &= !(1 << 3)
+        }
+
+        if window.is_key_down(Key::Right) {
+            direction &= !(1 << 0)
+        }
+        if window.is_key_down(Key::Left) {
+            direction &= !(1 << 1)
+        }
+        if window.is_key_down(Key::Up) {
+            direction &= !(1 << 2)
+        }
+        if window.is_key_down(Key::Down) {
+            direction &= !(1 << 3)
+        }
+
+
+        self.cpu.bus.joypad.action_state = action;
+        self.cpu.bus.joypad.direction_state = direction;
     }
 }

@@ -7,6 +7,7 @@ mod ppu;
 mod register;
 mod serial;
 mod timer;
+mod joypad;
 
 use std::env;
 use std::path::Path;
