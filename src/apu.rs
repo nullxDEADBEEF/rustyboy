@@ -1,52 +1,61 @@
 use blip_buf::BlipBuf;
 
+const CLOCKS_PER_SECOND: u32 = 4_194_304;
+const CLOCKS_PER_FRAME: u32 = CLOCKS_PER_SECOND / 512;
+const OUTPUT_SAMPLE_COUNT: usize = 2000;
+
+const DUTY_TABLE: [[i32; 8]; 4] = [
+    [-1, -1, -1, -1, 1, -1, -1, -1], // 12.5%
+    [-1, -1, -1, -1, 1, 1, -1, -1],  // 25%
+    [-1, -1, 1, 1, 1, 1, -1, -1],    // 50%
+    [1, 1, 1, 1, -1, -1, 1, 1],      // 75%
+];
+
 pub struct Apu {
-    enabled: bool, // master power
-    nr50: u8,      // master volume register
-    nr51: u8,      // sound panning register
+    enabled: bool,
+    nr50: u8,
+    nr51: u8,
+    volume_left: u8,
+    volume_right: u8,
     ch1: SquareChannel,
     ch2: SquareChannel,
     ch3: WaveChannel,
     ch4: NoiseChannel,
 
-    frame_sequencer_counter: u32,
-    frame_sequencer_step: u8,
-
-    blip_left: BlipBuf,
-    blip_right: BlipBuf,
-    t_clock: u32, // t-cycles since last frame
+    time: u32,
+    prev_time: u32,
+    next_frame_time: u32,
+    frame_step: u8,
+    output_period: u32,
 }
 
-const DUTY_TABLE: [[u8; 8]; 4] = [
-    [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
-    [0, 0, 0, 0, 0, 0, 1, 1], // 25%
-    [0, 0, 0, 0, 1, 1, 1, 1], // 50%
-    [1, 1, 1, 1, 1, 1, 0, 0], // 75%
-];
-
-const DIVISOR_TABLE: [u16; 8] = [8, 16, 32, 48, 64, 80, 96, 112];
+fn create_blipbuf(sample_rate: u32) -> BlipBuf {
+    let mut blipbuf = BlipBuf::new(OUTPUT_SAMPLE_COUNT as u32 + 1);
+    blipbuf.set_rates(CLOCKS_PER_SECOND as f64, sample_rate as f64);
+    blipbuf
+}
 
 impl Apu {
     pub fn new(sample_rate: u32) -> Self {
-        let mut apu = Self {
+        let output_period =
+            (OUTPUT_SAMPLE_COUNT as u64 * CLOCKS_PER_SECOND as u64) / sample_rate as u64;
+
+        Self {
             enabled: false,
             nr50: 0x00,
             nr51: 0x00,
-            ch1: SquareChannel::new(),
-            ch2: SquareChannel::new(),
-            ch3: WaveChannel::new(),
-            ch4: NoiseChannel::new(),
-            frame_sequencer_counter: 0,
-            frame_sequencer_step: 0,
-            blip_left: BlipBuf::new(sample_rate / 60 + 100), // one frame plus padding
-            blip_right: BlipBuf::new(sample_rate / 60 + 100),
-            t_clock: 0,
-        };
-
-        apu.blip_left.set_rates(4_194_304.0, sample_rate as f64);
-        apu.blip_right.set_rates(4_194_304.0, sample_rate as f64);
-
-        apu
+            volume_left: 0,
+            volume_right: 0,
+            ch1: SquareChannel::new(create_blipbuf(sample_rate), true),
+            ch2: SquareChannel::new(create_blipbuf(sample_rate), false),
+            ch3: WaveChannel::new(create_blipbuf(sample_rate)),
+            ch4: NoiseChannel::new(create_blipbuf(sample_rate)),
+            time: 0,
+            prev_time: 0,
+            next_frame_time: CLOCKS_PER_FRAME,
+            frame_step: 0,
+            output_period: output_period as u32,
+        }
     }
 
     pub fn read_byte(&self, addr: u16) -> u8 {
@@ -56,64 +65,39 @@ impl Apu {
                     | ((self.ch1.sweep_negate as u8) << 3)
                     | self.ch1.sweep_shift
             }
-            0xFF11 => {
-                (self.ch1.duty_cycle << 6) | 0x3F 
-            }
-            0xFF12 => {
-                (self.ch1.initial_volume << 4) | ((self.ch1.env_add_mode as u8) << 3) | self.ch1.env_period
-            }
-            0xFF13 => {
-                0xFF
-            }
-            0xFF14 => {
-                0xBF | ((self.ch1.length_enable as u8) << 6)
-            }
-            0xFF16 => (self.ch2.duty_cycle << 6) | 0x3F,
-            0xFF17 => {
-                (self.ch2.initial_volume << 4)
-                    | ((self.ch2.env_add_mode as u8) << 3)
-                    | self.ch2.env_period
-            }
-            0xFF18 => 0xFF, // read-only
-            0xFF19 => 0xBF | ((self.ch2.length_enable as u8) << 6),
+            0xFF11 => (self.ch1.duty << 6) | 0x3F,
+            0xFF12 => self.ch1.envelope.read(),
+            0xFF13 => 0xFF,
+            0xFF14 => 0xBF | ((self.ch1.length.enabled as u8) << 6),
+            0xFF16 => (self.ch2.duty << 6) | 0x3F,
+            0xFF17 => self.ch2.envelope.read(),
+            0xFF18 => 0xFF,
+            0xFF19 => 0xBF | ((self.ch2.length.enabled as u8) << 6),
             0xFF20 => 0xFF,
-            0xFF21 => {
-                (self.ch4.initial_volume << 4)
-                    | ((self.ch4.env_add_mode as u8) << 3)
-                    | self.ch4.env_period
-            }
-            0xFF22 => {
-                (self.ch4.clock_shift << 4)
-                    | ((self.ch4.width_mode as u8) << 3)
-                    | self.ch4.divisor_code
-            }
-            0xFF23 => 0xBF | ((self.ch4.length_enable as u8) << 6),
+            0xFF21 => self.ch4.envelope.read(),
+            0xFF22 => self.ch4.reg_ff22,
+            0xFF23 => 0xBF | ((self.ch4.length.enabled as u8) << 6),
             0xFF24 => self.nr50,
             0xFF25 => self.nr51,
             0xFF26 => {
                 0x70 | ((self.enabled as u8) << 7)
-                    | ((self.ch4.enabled as u8) << 3)
-                    | ((self.ch3.enabled as u8) << 2)
-                    | ((self.ch2.enabled as u8) << 1)
-                    | (self.ch1.enabled as u8)
+                    | ((self.ch4.active as u8) << 3)
+                    | ((self.ch3.active as u8) << 2)
+                    | ((self.ch2.active as u8) << 1)
+                    | (self.ch1.active as u8)
             }
             0xFF1A => 0x7F | ((self.ch3.dac_enabled as u8) << 7),
             0xFF1B => 0xFF,
-            0xFF1C => 0x9F | (self.ch3.volume_code << 5),
+            0xFF1C => 0x9F | (self.ch3.volume_shift_code << 5),
             0xFF1D => 0xFF,
-            0xFF1E => 0xBF | ((self.ch3.length_enable as u8) << 6),
+            0xFF1E => 0xBF | ((self.ch3.length.enabled as u8) << 6),
             0xFF30..=0xFF3F => {
-                if self.ch3.enabled {
-                    // DMG: reading wave RAM while CH3 is playing returns the byte
-                    // at the position CH3 is currently reading, but only if the
-                    // read aligns with the wave channel's sample fetch cycle
-                    if self.t_clock == self.ch3.sample_time {
-                        self.ch3.wave_ram[self.ch3.position as usize / 2]
-                    } else {
-                        0xFF
-                    }
-                } else {
+                if !self.ch3.active {
                     self.ch3.wave_ram[(addr - 0xFF30) as usize]
+                } else if self.ch3.sample_recently_accessed {
+                    self.ch3.wave_ram[self.ch3.current_wave as usize >> 1]
+                } else {
+                    0xFF
                 }
             }
             _ => 0xFF,
@@ -121,410 +105,736 @@ impl Apu {
     }
 
     pub fn write_byte(&mut self, addr: u16, value: u8) {
-        // DMG: length registers (NRx1) can be written while APU is off
         let is_length_reg = matches!(addr, 0xFF11 | 0xFF16 | 0xFF1B | 0xFF20);
-        if !self.enabled && addr != 0xFF26 && !(0xFF30..=0xFF3F).contains(&addr) && !is_length_reg
-        {
+        if !self.enabled && addr != 0xFF26 && !(0xFF30..=0xFF3F).contains(&addr) && !is_length_reg {
             return;
+        }
+
+        // Run channels up to current time before modifying state
+        if self.enabled {
+            self.run();
         }
 
         match addr {
             0xFF10 => {
-                let was_negate = self.ch1.sweep_negate;
+                let old_negate = self.ch1.sweep_negate;
                 self.ch1.sweep_period = (value >> 4) & 0x07;
                 self.ch1.sweep_negate = value & 0x08 != 0;
                 self.ch1.sweep_shift = value & 0x07;
-                // Clearing negate after it was used in a calculation disables channel
-                if was_negate && !self.ch1.sweep_negate && self.ch1.sweep_has_negated {
-                    self.ch1.enabled = false;
+                if old_negate && !self.ch1.sweep_negate && self.ch1.sweep_did_negate {
+                    self.ch1.active = false;
                 }
+                self.ch1.sweep_did_negate = false;
             }
             0xFF11 => {
-                self.ch1.duty_cycle = (value >> 6) & 0x03;
-                self.ch1.length_load = value & 0x3F;
-                self.ch1.length_timer = 64 - self.ch1.length_load;
+                self.ch1.duty = (value >> 6) & 0x03;
+                self.ch1.length.set(value & 0x3F);
             }
             0xFF12 => {
-                self.ch1.initial_volume = (value >> 4) & 0x0F;
-                self.ch1.env_add_mode = value & 0x08 != 0;
-                self.ch1.env_period = value & 0x07;
                 self.ch1.dac_enabled = value & 0xF8 != 0;
-                if !self.ch1.dac_enabled {
-                    self.ch1.enabled = false;
-                }
+                self.ch1.active = self.ch1.active && self.ch1.dac_enabled;
+                self.ch1.envelope.write_nrx2(value);
             }
             0xFF13 => {
-                self.ch1.freq_low = value;
+                self.ch1.frequency = (self.ch1.frequency & 0x0700) | value as u16;
+                self.ch1.calculate_period();
             }
             0xFF14 => {
-                let was_length_enabled = self.ch1.length_enable;
-                self.ch1.length_enable = value & 0x40 != 0;
-                self.ch1.freq_high = value & 0x07;
+                self.ch1.frequency = (self.ch1.frequency & 0x00FF) | (((value & 0x07) as u16) << 8);
+                self.ch1.calculate_period();
 
-                // Extra length clocking on enable transition (DMG quirk)
-                let in_first_half = self.frame_sequencer_step % 2 != 0;
-                if !was_length_enabled && self.ch1.length_enable && in_first_half {
-                    self.ch1.clock_length();
-                }
+                self.ch1.length.enable(value & 0x40 != 0, self.frame_step);
+                self.ch1.active = self.ch1.active && self.ch1.length.is_active();
 
                 if value & 0x80 != 0 {
-                    let length_was_zero = self.ch1.length_timer == 0;
-
                     if self.ch1.dac_enabled {
-                        self.ch1.enabled = true;
+                        self.ch1.active = true;
                     }
-                    self.ch1.current_volume = self.ch1.initial_volume;
-                    self.ch1.env_timer = self.ch1.env_period;
+                    self.ch1.length.trigger(self.frame_step);
+                    self.ch1.envelope.trigger();
 
-                    if self.ch1.length_timer == 0 {
-                        self.ch1.length_timer = 64;
-                    }
-
-                    let freq = (self.ch1.freq_high as u16) << 8 | self.ch1.freq_low as u16;
-                    self.ch1.freq_timer = (2048 - freq) * 4;
-                    self.ch1.duty_position = 0;
-
-                    self.ch1.shadow_freq = freq;
-
-                    self.ch1.sweep_timer = if self.ch1.sweep_period > 0 {
+                    self.ch1.sweep_frequency = self.ch1.frequency;
+                    self.ch1.sweep_delay = if self.ch1.sweep_period != 0 {
                         self.ch1.sweep_period
                     } else {
                         8
                     };
+                    self.ch1.sweep_enabled = self.ch1.sweep_period > 0 || self.ch1.sweep_shift > 0;
+                    self.ch1.sweep_did_negate = false;
 
-                    self.ch1.sweep_enabled =
-                        self.ch1.sweep_period != 0 || self.ch1.sweep_shift != 0;
-                    self.ch1.sweep_has_negated = false;
-
-                    if self.ch1.sweep_shift != 0 {
-                        let new_freq = if self.ch1.sweep_negate {
-                            self.ch1.sweep_has_negated = true;
-                            self.ch1
-                                .shadow_freq
-                                .wrapping_sub(self.ch1.shadow_freq >> self.ch1.sweep_shift)
-                        } else {
-                            self.ch1.shadow_freq + (self.ch1.shadow_freq >> self.ch1.sweep_shift)
-                        };
-                        if new_freq > 2047 {
-                            self.ch1.enabled = false;
-                        }
-                    }
-
-                    // Extra clock when trigger unfreezes length (reloaded from 0)
-                    if length_was_zero && self.ch1.length_enable && in_first_half {
-                        self.ch1.clock_length();
+                    if self.ch1.sweep_shift > 0 {
+                        self.ch1.sweep_calculate_frequency();
                     }
                 }
             }
             0xFF16 => {
-                self.ch2.duty_cycle = (value >> 6) & 0x03;
-                self.ch2.length_load = value & 0x3F;
-                self.ch2.length_timer = 64 - self.ch2.length_load;
+                self.ch2.duty = (value >> 6) & 0x03;
+                self.ch2.length.set(value & 0x3F);
             }
             0xFF17 => {
-                self.ch2.initial_volume = (value >> 4) & 0x0F;
-                self.ch2.env_add_mode = value & 0x08 != 0;
-                self.ch2.env_period = value & 0x07;
                 self.ch2.dac_enabled = value & 0xF8 != 0;
-                if !self.ch2.dac_enabled {
-                    self.ch2.enabled = false;
-                }
+                self.ch2.active = self.ch2.active && self.ch2.dac_enabled;
+                self.ch2.envelope.write_nrx2(value);
             }
             0xFF18 => {
-                self.ch2.freq_low = value;
+                self.ch2.frequency = (self.ch2.frequency & 0x0700) | value as u16;
+                self.ch2.calculate_period();
             }
             0xFF19 => {
-                let was_length_enabled = self.ch2.length_enable;
-                self.ch2.length_enable = value & 0x40 != 0;
-                self.ch2.freq_high = value & 0x07;
+                self.ch2.frequency = (self.ch2.frequency & 0x00FF) | (((value & 0x07) as u16) << 8);
+                self.ch2.calculate_period();
 
-                let in_first_half = self.frame_sequencer_step % 2 != 0;
-                if !was_length_enabled && self.ch2.length_enable && in_first_half {
-                    self.ch2.clock_length();
-                }
+                self.ch2.length.enable(value & 0x40 != 0, self.frame_step);
+                self.ch2.active = self.ch2.active && self.ch2.length.is_active();
 
                 if value & 0x80 != 0 {
-                    let length_was_zero = self.ch2.length_timer == 0;
-
                     if self.ch2.dac_enabled {
-                        self.ch2.enabled = true;
+                        self.ch2.active = true;
                     }
-                    self.ch2.current_volume = self.ch2.initial_volume;
-                    self.ch2.env_timer = self.ch2.env_period;
-
-                    if self.ch2.length_timer == 0 {
-                        self.ch2.length_timer = 64;
-                    }
-
-                    let freq = (self.ch2.freq_high as u16) << 8 | self.ch2.freq_low as u16;
-                    self.ch2.freq_timer = (2048 - freq) * 4;
-                    self.ch2.duty_position = 0;
-
-                    if length_was_zero && self.ch2.length_enable && in_first_half {
-                        self.ch2.clock_length();
-                    }
-                }
-            }
-            0xFF20 => {
-                self.ch4.length_load = value & 0x3F;
-                self.ch4.length_timer = 64 - self.ch4.length_load;
-            }
-            0xFF21 => {
-                self.ch4.initial_volume = (value >> 4) & 0x0F;
-                self.ch4.env_add_mode = value & 0x08 != 0;
-                self.ch4.env_period = value & 0x07;
-                
-                self.ch4.dac_enabled = value & 0xF8 != 0;
-                if !self.ch4.dac_enabled {
-                    self.ch4.enabled = false;
-                }
-            }
-            0xFF22 => {
-                self.ch4.divisor_code = value & 0x07;
-                self.ch4.width_mode = (value & 0x08) != 0;
-                self.ch4.clock_shift = (value >> 4) & 0x0F;
-            }
-            0xFF23 => {
-                let was_length_enabled = self.ch4.length_enable;
-                self.ch4.length_enable = value & 0x40 != 0;
-
-                let in_first_half = self.frame_sequencer_step % 2 != 0;
-                if !was_length_enabled && self.ch4.length_enable && in_first_half {
-                    self.ch4.clock_length();
-                }
-
-                if value & 0x80 != 0 {
-                    let length_was_zero = self.ch4.length_timer == 0;
-
-                    if self.ch4.dac_enabled {
-                        self.ch4.enabled = true;
-                    }
-
-                    if self.ch4.length_timer == 0 {
-                        self.ch4.length_timer = 64;
-                    }
-
-                    self.ch4.env_timer = self.ch4.env_period;
-                    self.ch4.current_volume = self.ch4.initial_volume;
-                    self.ch4.lfsr = 0x7FFF;
-                    self.ch4.freq_timer =
-                        DIVISOR_TABLE[self.ch4.divisor_code as usize] << self.ch4.clock_shift;
-
-                    if length_was_zero && self.ch4.length_enable && in_first_half {
-                        self.ch4.clock_length();
-                    }
+                    self.ch2.length.trigger(self.frame_step);
+                    self.ch2.envelope.trigger();
                 }
             }
             0xFF1A => {
                 self.ch3.dac_enabled = (value & 0x80) != 0;
-                if !self.ch3.dac_enabled {
-                    self.ch3.enabled = false;
-                }
+                self.ch3.active = self.ch3.active && self.ch3.dac_enabled;
             }
             0xFF1B => {
-                self.ch3.length_load = value as u16;
-                self.ch3.length_timer = 256 - self.ch3.length_load;
+                self.ch3.length.set(value);
             }
             0xFF1C => {
-                self.ch3.volume_code = (value >> 5) & 0x03;
+                self.ch3.volume_shift_code = (value >> 5) & 0x03;
             }
             0xFF1D => {
-                self.ch3.freq_low = value;
+                self.ch3.frequency = (self.ch3.frequency & 0x0700) | value as u16;
+                self.ch3.calculate_period();
             }
             0xFF1E => {
-                let was_length_enabled = self.ch3.length_enable;
-                self.ch3.length_enable = value & 0x40 != 0;
-                self.ch3.freq_high = value & 0x07;
+                self.ch3.frequency = (self.ch3.frequency & 0x00FF) | (((value & 0x07) as u16) << 8);
+                self.ch3.calculate_period();
 
-                let in_first_half = self.frame_sequencer_step % 2 != 0;
-                if !was_length_enabled && self.ch3.length_enable && in_first_half {
-                    self.ch3.clock_length();
-                }
+                self.ch3.length.enable(value & 0x40 != 0, self.frame_step);
+                self.ch3.active = self.ch3.active && self.ch3.length.is_active();
 
                 if value & 0x80 != 0 {
-                    // DMG wave corruption: if retriggered while playing and the trigger
-                    // coincides with the wave channel reading a sample, wave RAM gets corrupted
-                    if self.ch3.enabled && self.ch3.sample_time != u32::MAX {
-                        let freq =
-                            (self.ch3.freq_high as u16) << 8 | self.ch3.freq_low as u16;
-                        let period = ((2048u16).saturating_sub(freq)) * 2;
-                        let time_since_read =
-                            self.t_clock.wrapping_sub(self.ch3.sample_time);
-                        if period > 0 && time_since_read % period as u32 == 0 {
-                            let pos = self.ch3.position as usize;
-                            if pos < 4 {
-                                self.ch3.wave_ram[0] =
-                                    self.ch3.wave_ram[pos / 2];
-                            } else {
-                                let src = ((pos & !3) / 2) % 16;
-                                let bytes: [u8; 4] = [
-                                    self.ch3.wave_ram[src % 16],
-                                    self.ch3.wave_ram[(src + 1) % 16],
-                                    self.ch3.wave_ram[(src + 2) % 16],
-                                    self.ch3.wave_ram[(src + 3) % 16],
-                                ];
-                                self.ch3.wave_ram[0] = bytes[0];
-                                self.ch3.wave_ram[1] = bytes[1];
-                                self.ch3.wave_ram[2] = bytes[2];
-                                self.ch3.wave_ram[3] = bytes[3];
-                            }
-                        }
-                    }
-
-                    let length_was_zero = self.ch3.length_timer == 0;
+                    self.ch3.length.trigger(self.frame_step);
+                    self.ch3.current_wave = 0;
+                    // Additional delay on trigger
+                    self.ch3.delay = self.ch3.period + 4;
 
                     if self.ch3.dac_enabled {
-                        self.ch3.enabled = true;
+                        self.ch3.active = true;
                     }
+                }
+            }
+            0xFF20 => {
+                self.ch4.length.set(value & 0x3F);
+            }
+            0xFF21 => {
+                self.ch4.dac_enabled = value & 0xF8 != 0;
+                self.ch4.active = self.ch4.active && self.ch4.dac_enabled;
+                self.ch4.envelope.write_nrx2(value);
+            }
+            0xFF22 => {
+                self.ch4.reg_ff22 = value;
+                self.ch4.shift_width = if value & 8 != 0 { 6 } else { 14 };
+                let freq_div = match value & 7 {
+                    0 => 8u32,
+                    n => n as u32 * 16,
+                };
+                self.ch4.period = freq_div << (value >> 4);
+            }
+            0xFF23 => {
+                self.ch4.length.enable(value & 0x40 != 0, self.frame_step);
+                self.ch4.active = self.ch4.active && self.ch4.length.is_active();
 
-                    if self.ch3.length_timer == 0 {
-                        self.ch3.length_timer = 256;
+                if value & 0x80 != 0 {
+                    self.ch4.length.trigger(self.frame_step);
+                    self.ch4.state = 0xFF;
+                    self.ch4.delay = 0;
+
+                    if self.ch4.dac_enabled {
+                        self.ch4.active = true;
                     }
-
-                    let freq = (self.ch3.freq_high as u16) << 8 | self.ch3.freq_low as u16;
-                    self.ch3.freq_timer = (2048 - freq) * 2 + 6; // +6 T-cycle trigger delay
-                    self.ch3.position = 0;
-                    self.ch3.sample_time = u32::MAX; // no sample read yet
-
-                    if length_was_zero && self.ch3.length_enable && in_first_half {
-                        self.ch3.clock_length();
-                    }
+                    self.ch4.envelope.trigger();
                 }
             }
             0xFF24 => {
                 self.nr50 = value;
+                self.volume_left = value & 0x07;
+                self.volume_right = (value >> 4) & 0x07;
             }
             0xFF25 => {
                 self.nr51 = value;
             }
             0xFF26 => {
-                if value & 0x80 == 0 {
-                    self.enabled = false;
-                    self.nr50 = 0x00;
-                    self.nr51 = 0x00;
-
-                    let ch1_length = self.ch1.length_timer;
-                    let ch2_length = self.ch2.length_timer;
-                    let ch3_length = self.ch3.length_timer;
-                    let ch4_length = self.ch4.length_timer;
-                    let wave_ram = self.ch3.wave_ram;
-
-                    self.ch1 = SquareChannel::new();
-                    self.ch2 = SquareChannel::new();
-                    self.ch3 = WaveChannel::new();
-                    self.ch4 = NoiseChannel::new();
-
-                    self.ch1.length_timer = ch1_length;
-                    self.ch2.length_timer = ch2_length;
-                    self.ch3.length_timer = ch3_length;
-                    self.ch4.length_timer = ch4_length;
-                    self.ch3.wave_ram = wave_ram;
-
-                    self.frame_sequencer_counter = 0;
-                    self.frame_sequencer_step = 0;
-                } else {
-                    self.enabled = true;
+                let turn_on = value & 0x80 != 0;
+                if self.enabled && !turn_on {
+                    // Reset all registers to 0 when turning off
+                    for i in 0xFF10..=0xFF25u16 {
+                        self.write_byte(i, 0);
+                    }
+                    self.nr50 = 0;
+                    self.nr51 = 0;
+                }
+                if !self.enabled && turn_on {
+                    self.frame_step = 0;
+                }
+                self.enabled = turn_on;
+            }
+            0xFF30..=0xFF3F => {
+                if !self.ch3.active {
+                    self.ch3.wave_ram[(addr - 0xFF30) as usize] = value;
+                } else if self.ch3.sample_recently_accessed {
+                    self.ch3.wave_ram[self.ch3.current_wave as usize >> 1] = value;
                 }
             }
-            0xFF30..=0xFF3F => self.ch3.wave_ram[(addr - 0xFF30) as usize] = value,
             _ => {}
         }
     }
 
+    /// Called by the CPU after each instruction with the number of M-cycles elapsed.
     pub fn step(&mut self, cycles: u8) {
-        let t_cycles = cycles * 4;
-        let should_advance_frame_sequencer_step = 4_194_304 / 512;
+        if !self.enabled {
+            return;
+        }
 
-        for _ in 0..t_cycles {
-            self.t_clock += 1;
+        let t_cycles = cycles as u32 * 4;
+        self.time += t_cycles;
 
-            if self.enabled {
-                self.frame_sequencer_counter += 1;
+        if self.time >= self.output_period {
+            self.do_output();
+        }
+    }
+
+    /// Run channels and frame sequencer up to self.time.
+    fn run(&mut self) {
+        while self.next_frame_time <= self.time {
+            self.ch1.run(self.prev_time, self.next_frame_time);
+            self.ch2.run(self.prev_time, self.next_frame_time);
+            self.ch3.run(self.prev_time, self.next_frame_time);
+            self.ch4.run(self.prev_time, self.next_frame_time);
+
+            if self.frame_step % 2 == 0 {
+                self.ch1.step_length();
+                self.ch2.step_length();
+                self.ch3.step_length();
+                self.ch4.step_length();
+            }
+            if self.frame_step % 4 == 2 {
+                self.ch1.step_sweep();
+            }
+            if self.frame_step == 7 {
+                self.ch1.envelope.step();
+                self.ch2.envelope.step();
+                self.ch4.envelope.step();
             }
 
-            if self.frame_sequencer_counter == should_advance_frame_sequencer_step {
-                self.frame_sequencer_counter = 0;
+            self.frame_step = (self.frame_step + 1) & 7;
+            self.prev_time = self.next_frame_time;
+            self.next_frame_time += CLOCKS_PER_FRAME;
+        }
 
-                if self.frame_sequencer_step % 2 == 0 {
-                    self.ch1.clock_length();
-                    self.ch2.clock_length();
-                    self.ch3.clock_length();
-                    self.ch4.clock_length();
-                }
-                if self.frame_sequencer_step == 2 || self.frame_sequencer_step == 6 {
-                    self.ch1.clock_sweep();
-                }
-                if self.frame_sequencer_step == 7 {
-                    self.ch1.clock_envelope();
-                    self.ch2.clock_envelope();
-                    self.ch4.clock_envelope();
-                }
+        if self.prev_time != self.time {
+            self.ch1.run(self.prev_time, self.time);
+            self.ch2.run(self.prev_time, self.time);
+            self.ch3.run(self.prev_time, self.time);
+            self.ch4.run(self.prev_time, self.time);
+            self.prev_time = self.time;
+        }
+    }
 
-                self.frame_sequencer_step = (self.frame_sequencer_step + 1) & 7;
+    fn do_output(&mut self) {
+        self.run();
+
+        self.ch1.blip.end_frame(self.time);
+        self.ch2.blip.end_frame(self.time);
+        self.ch3.blip.end_frame(self.time);
+        self.ch4.blip.end_frame(self.time);
+
+        self.next_frame_time -= self.time;
+        self.time = 0;
+        self.prev_time = 0;
+    }
+
+    /// Called once per video frame. Reads downsampled audio and mixes channels with panning.
+    pub fn end_frame(&mut self) -> Vec<f32> {
+        // Make sure all pending audio is flushed
+        if self.enabled {
+            self.do_output();
+        }
+
+        let sample_count = self.ch1.blip.samples_avail() as usize;
+
+        let left_vol = (self.volume_left as f32 / 7.0) * (1.0 / 15.0) * 0.25;
+        let right_vol = (self.volume_right as f32 / 7.0) * (1.0 / 15.0) * 0.25;
+
+        let mut buf_left = vec![0f32; sample_count];
+        let mut buf_right = vec![0f32; sample_count];
+        let mut buf = vec![0i16; sample_count];
+
+        // Channel 1
+        let count = self.ch1.blip.read_samples(&mut buf, false);
+        for (i, &v) in buf[..count].iter().enumerate() {
+            if self.nr51 & 0x10 != 0 {
+                buf_left[i] += v as f32 * left_vol;
             }
-
-            if let Some(amp_delta) = self.ch1.tick() {
-                if self.nr51 & 0x10 != 0 {
-                    self.blip_left.add_delta(self.t_clock, amp_delta);
-                }
-                if self.nr51 & 0x01 != 0 {
-                    self.blip_right.add_delta(self.t_clock, amp_delta);
-                }
+            if self.nr51 & 0x01 != 0 {
+                buf_right[i] += v as f32 * right_vol;
             }
+        }
 
-            if let Some(amp_delta) = self.ch2.tick() {
-                if self.nr51 & 0x20 != 0 {
-                    self.blip_left.add_delta(self.t_clock, amp_delta);
-                }
-                if self.nr51 & 0x02 != 0 {
-                    self.blip_right.add_delta(self.t_clock, amp_delta);
-                }
+        // Channel 2
+        let count = self.ch2.blip.read_samples(&mut buf, false);
+        for (i, &v) in buf[..count].iter().enumerate() {
+            if self.nr51 & 0x20 != 0 {
+                buf_left[i] += v as f32 * left_vol;
             }
-
-            if let Some(amp_delta) = self.ch3.tick(self.t_clock) {
-                if self.nr51 & 0x40 != 0 {
-                    self.blip_left.add_delta(self.t_clock, amp_delta);
-                }
-                if self.nr51 & 0x04 != 0 {
-                    self.blip_right.add_delta(self.t_clock, amp_delta);
-                }
+            if self.nr51 & 0x02 != 0 {
+                buf_right[i] += v as f32 * right_vol;
             }
+        }
 
-            if let Some(amp_delta) = self.ch4.tick() {
-                if self.nr51 & 0x80 != 0 {
-                    self.blip_left.add_delta(self.t_clock, amp_delta);
-                }
-                if self.nr51 & 0x08 != 0 {
-                    self.blip_right.add_delta(self.t_clock, amp_delta);
-                }
+        // Channel 3 (wave) — outputs at 4x amplitude for precision, divide back
+        let count = self.ch3.blip.read_samples(&mut buf, false);
+        for (i, &v) in buf[..count].iter().enumerate() {
+            if self.nr51 & 0x40 != 0 {
+                buf_left[i] += (v as f32 / 4.0) * left_vol;
+            }
+            if self.nr51 & 0x04 != 0 {
+                buf_right[i] += (v as f32 / 4.0) * right_vol;
+            }
+        }
+
+        // Channel 4 (noise)
+        let count = self.ch4.blip.read_samples(&mut buf, false);
+        for (i, &v) in buf[..count].iter().enumerate() {
+            if self.nr51 & 0x80 != 0 {
+                buf_left[i] += v as f32 * left_vol;
+            }
+            if self.nr51 & 0x08 != 0 {
+                buf_right[i] += v as f32 * right_vol;
+            }
+        }
+
+        // Interleave L/R
+        let mut interleaved = Vec::with_capacity(sample_count * 2);
+        for i in 0..sample_count {
+            interleaved.push(buf_left[i]);
+            interleaved.push(buf_right[i]);
+        }
+        interleaved
+    }
+}
+
+// ─── Volume Envelope ──────────────────────────────────────────────────────────
+
+struct VolumeEnvelope {
+    period: u8,
+    goes_up: bool,
+    delay: u8,
+    initial_volume: u8,
+    volume: u8,
+}
+
+impl VolumeEnvelope {
+    fn new() -> Self {
+        Self {
+            period: 0,
+            goes_up: false,
+            delay: 0,
+            initial_volume: 0,
+            volume: 0,
+        }
+    }
+
+    fn read(&self) -> u8 {
+        ((self.initial_volume & 0xF) << 4)
+            | if self.goes_up { 0x08 } else { 0 }
+            | (self.period & 0x07)
+    }
+
+    fn write_nrx2(&mut self, v: u8) {
+        self.period = v & 0x07;
+        self.goes_up = v & 0x08 != 0;
+        self.initial_volume = v >> 4;
+        self.volume = self.initial_volume;
+    }
+
+    fn trigger(&mut self) {
+        self.delay = self.period;
+        self.volume = self.initial_volume;
+    }
+
+    fn step(&mut self) {
+        if self.delay > 1 {
+            self.delay -= 1;
+        } else if self.delay == 1 {
+            self.delay = self.period;
+            if self.goes_up && self.volume < 15 {
+                self.volume += 1;
+            } else if !self.goes_up && self.volume > 0 {
+                self.volume -= 1;
+            }
+        }
+    }
+}
+
+// ─── Length Counter ───────────────────────────────────────────────────────────
+
+struct LengthCounter {
+    enabled: bool,
+    value: u16,
+    max: u16,
+}
+
+impl LengthCounter {
+    fn new(max: u16) -> Self {
+        Self {
+            enabled: false,
+            value: 0,
+            max,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.value > 0
+    }
+
+    fn extra_step(frame_step: u8) -> bool {
+        // True when the *last* step was a length step (odd frame_step means
+        // the next step is not a length step, so we just did one).
+        frame_step % 2 == 1
+    }
+
+    fn enable(&mut self, enable: bool, frame_step: u8) {
+        let was_enabled = self.enabled;
+        self.enabled = enable;
+        if !was_enabled && self.enabled && Self::extra_step(frame_step) {
+            self.step();
+        }
+    }
+
+    fn set(&mut self, minus_value: u8) {
+        self.value = self.max - minus_value as u16;
+    }
+
+    fn trigger(&mut self, frame_step: u8) {
+        if self.value == 0 {
+            self.value = self.max;
+            if Self::extra_step(frame_step) {
+                self.step();
             }
         }
     }
 
-    pub fn end_frame(&mut self) -> Vec<i16> {
-        self.blip_left.end_frame(self.t_clock);
-        self.blip_right.end_frame(self.t_clock);
-
-        self.t_clock = 0;
-
-        let left_available_samples = self.blip_left.samples_avail();
-        let right_available_samples = self.blip_right.samples_avail();
-
-        let mut left_buf = vec![0i16; left_available_samples as usize];
-        let mut right_buf = vec![0i16; right_available_samples as usize];
-
-        self.blip_left.read_samples(&mut left_buf, false);
-        self.blip_right.read_samples(&mut right_buf, false);
-
-        let interleaved_samples = left_buf
-            .iter()
-            .zip(right_buf.iter())
-            .flat_map(|(l, r)| [*l, *r])
-            .collect();
-
-        interleaved_samples
+    fn step(&mut self) {
+        if self.enabled && self.value > 0 {
+            self.value -= 1;
+        }
     }
 }
+
+// ─── Square Channel ───────────────────────────────────────────────────────────
+
+struct SquareChannel {
+    active: bool,
+    dac_enabled: bool,
+    duty: u8,
+    phase: u8,
+    length: LengthCounter,
+    frequency: u16,
+    period: u32,
+    last_amp: i32,
+    delay: u32,
+    has_sweep: bool,
+    sweep_enabled: bool,
+    sweep_frequency: u16,
+    sweep_delay: u8,
+    sweep_period: u8,
+    sweep_shift: u8,
+    sweep_negate: bool,
+    sweep_did_negate: bool,
+    envelope: VolumeEnvelope,
+    blip: BlipBuf,
+}
+
+impl SquareChannel {
+    fn new(blip: BlipBuf, has_sweep: bool) -> Self {
+        Self {
+            active: false,
+            dac_enabled: false,
+            duty: 0,
+            phase: 0,
+            length: LengthCounter::new(64),
+            frequency: 0,
+            period: 2048,
+            last_amp: 0,
+            delay: 0,
+            has_sweep,
+            sweep_enabled: false,
+            sweep_frequency: 0,
+            sweep_delay: 0,
+            sweep_period: 0,
+            sweep_shift: 0,
+            sweep_negate: false,
+            sweep_did_negate: false,
+            envelope: VolumeEnvelope::new(),
+            blip,
+        }
+    }
+
+    fn calculate_period(&mut self) {
+        if self.frequency > 2047 {
+            self.period = 0;
+        } else {
+            self.period = (2048 - self.frequency as u32) * 4;
+        }
+    }
+
+    fn run(&mut self, start_time: u32, end_time: u32) {
+        if !self.active || self.period == 0 {
+            if self.last_amp != 0 {
+                self.blip.add_delta(start_time, -self.last_amp);
+                self.last_amp = 0;
+                self.delay = 0;
+            }
+            return;
+        }
+
+        let mut time = start_time + self.delay;
+        let pattern = DUTY_TABLE[self.duty as usize];
+        let vol = self.envelope.volume as i32;
+
+        while time < end_time {
+            let amp = vol * pattern[self.phase as usize];
+            if amp != self.last_amp {
+                self.blip.add_delta(time, amp - self.last_amp);
+                self.last_amp = amp;
+            }
+            time += self.period;
+            self.phase = (self.phase + 1) & 7;
+        }
+
+        self.delay = time - end_time;
+    }
+
+    fn step_length(&mut self) {
+        self.length.step();
+        self.active = self.active && self.length.is_active();
+    }
+
+    fn sweep_calculate_frequency(&mut self) -> u16 {
+        let offset = self.sweep_frequency >> self.sweep_shift;
+        let new_freq = if self.sweep_negate {
+            self.sweep_did_negate = true;
+            self.sweep_frequency.wrapping_sub(offset)
+        } else {
+            self.sweep_frequency.wrapping_add(offset)
+        };
+        if new_freq > 2047 {
+            self.active = false;
+        }
+        new_freq
+    }
+
+    fn step_sweep(&mut self) {
+        if !self.has_sweep {
+            return;
+        }
+
+        if self.sweep_delay > 1 {
+            self.sweep_delay -= 1;
+        } else {
+            if self.sweep_period == 0 {
+                self.sweep_delay = 8;
+            } else {
+                self.sweep_delay = self.sweep_period;
+                if self.sweep_enabled {
+                    let new_freq = self.sweep_calculate_frequency();
+                    if new_freq <= 2047 && self.sweep_shift != 0 {
+                        self.sweep_frequency = new_freq;
+                        self.frequency = new_freq;
+                        self.calculate_period();
+                    }
+                    // Second overflow check
+                    self.sweep_calculate_frequency();
+                }
+            }
+        }
+    }
+}
+
+// ─── Wave Channel ─────────────────────────────────────────────────────────────
+
+struct WaveChannel {
+    active: bool,
+    dac_enabled: bool,
+    length: LengthCounter,
+    frequency: u16,
+    period: u32,
+    last_amp: i32,
+    delay: u32,
+    volume_shift_code: u8,
+    wave_ram: [u8; 16],
+    current_wave: u8,
+    sample_recently_accessed: bool,
+    blip: BlipBuf,
+}
+
+impl WaveChannel {
+    fn new(blip: BlipBuf) -> Self {
+        Self {
+            active: false,
+            dac_enabled: false,
+            length: LengthCounter::new(256),
+            frequency: 0,
+            period: 2048,
+            last_amp: 0,
+            delay: 0,
+            volume_shift_code: 0,
+            wave_ram: [0; 16],
+            current_wave: 0,
+            sample_recently_accessed: false,
+            blip,
+        }
+    }
+
+    fn calculate_period(&mut self) {
+        if self.frequency > 2048 {
+            self.period = 0;
+        } else {
+            self.period = (2048 - self.frequency as u32) * 2;
+        }
+    }
+
+    fn run(&mut self, start_time: u32, end_time: u32) {
+        self.sample_recently_accessed = false;
+        if !self.active || self.period == 0 {
+            if self.last_amp != 0 {
+                self.blip.add_delta(start_time, -self.last_amp);
+                self.last_amp = 0;
+                self.delay = 0;
+            }
+            return;
+        }
+
+        let mut time = start_time + self.delay;
+
+        // Wave channel outputs at 4x amplitude to avoid precision loss on 25% volume shift.
+        // This is accounted for during mixing in end_frame().
+        let vol_shift = match self.volume_shift_code {
+            0 => 4 + 2, // mute: shift a 4-bit sample * 4 to zero
+            1 => 0,     // 100%
+            2 => 1,     // 50%
+            3 => 2,     // 25%
+            _ => 4 + 2,
+        };
+
+        while time < end_time {
+            let wave_byte = self.wave_ram[self.current_wave as usize >> 1];
+            let sample = if self.current_wave % 2 == 0 {
+                wave_byte >> 4
+            } else {
+                wave_byte & 0x0F
+            };
+
+            // Shift left by 2 so 25% doesn't lose precision
+            let amp = ((sample << 2) >> vol_shift) as i32;
+
+            if amp != self.last_amp {
+                self.blip.add_delta(time, amp - self.last_amp);
+                self.last_amp = amp;
+            }
+
+            if time >= end_time.saturating_sub(2) {
+                self.sample_recently_accessed = true;
+            }
+            time += self.period;
+            self.current_wave = (self.current_wave + 1) & 31;
+        }
+
+        self.delay = time - end_time;
+    }
+
+    fn step_length(&mut self) {
+        self.length.step();
+        self.active = self.active && self.length.is_active();
+    }
+}
+
+// ─── Noise Channel ────────────────────────────────────────────────────────────
+
+struct NoiseChannel {
+    active: bool,
+    dac_enabled: bool,
+    reg_ff22: u8,
+    length: LengthCounter,
+    envelope: VolumeEnvelope,
+    period: u32,
+    shift_width: u8,
+    state: u16,
+    delay: u32,
+    last_amp: i32,
+    blip: BlipBuf,
+}
+
+impl NoiseChannel {
+    fn new(blip: BlipBuf) -> Self {
+        Self {
+            active: false,
+            dac_enabled: false,
+            reg_ff22: 0,
+            length: LengthCounter::new(64),
+            envelope: VolumeEnvelope::new(),
+            period: 2048,
+            shift_width: 14,
+            state: 1,
+            delay: 0,
+            last_amp: 0,
+            blip,
+        }
+    }
+
+    fn run(&mut self, start_time: u32, end_time: u32) {
+        if !self.active {
+            if self.last_amp != 0 {
+                self.blip.add_delta(start_time, -self.last_amp);
+                self.last_amp = 0;
+                self.delay = 0;
+            }
+            return;
+        }
+
+        let mut time = start_time + self.delay;
+        while time < end_time {
+            let old_state = self.state;
+            self.state <<= 1;
+            let bit = ((old_state >> self.shift_width) ^ (self.state >> self.shift_width)) & 1;
+            self.state |= bit;
+
+            let amp = match (old_state >> self.shift_width) & 1 {
+                0 => -(self.envelope.volume as i32),
+                _ => self.envelope.volume as i32,
+            };
+
+            if self.last_amp != amp {
+                self.blip.add_delta(time, amp - self.last_amp);
+                self.last_amp = amp;
+            }
+
+            time += self.period;
+        }
+        self.delay = time - end_time;
+    }
+
+    fn step_length(&mut self) {
+        self.length.step();
+        self.active = self.active && self.length.is_active();
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -545,66 +855,86 @@ mod tests {
         // power off should zero registers
         apu.write_byte(0xFF26, 0x00);
         assert_eq!(apu.read_byte(0xFF26) & 0x80, 0x00);
-        assert_eq!(apu.read_byte(0xFF24), 0x00); // disabled -> NR50 zeroed, mask $00
+        assert_eq!(apu.read_byte(0xFF24), 0x00);
     }
 
     #[test]
-    fn ch2_tick_advances_duty_and_produces_amplitude() {
-        let mut apu = Apu::new(256);
+    fn ch2_trigger_enables_and_produces_output() {
+        let mut apu = Apu::new(44100);
 
         // Power on APU
         apu.write_byte(0xFF26, 0x80);
-        // NR21: duty 50% (0b10), length 0
+        // Enable CH2 on both outputs, master volume max
+        apu.write_byte(0xFF25, 0x22);
+        apu.write_byte(0xFF24, 0x77);
+        // NR21: duty 50%, length 0
         apu.write_byte(0xFF16, 0x80);
         // NR22: volume 15, no envelope
         apu.write_byte(0xFF17, 0xF0);
         // NR23: freq low = 0x00
         apu.write_byte(0xFF18, 0x00);
-        // NR24: trigger + freq high = 7 → freq = 0x700 = 1792, timer = (2048-1792)*4 = 1024
+        // NR24: trigger + freq high = 7
         apu.write_byte(0xFF19, 0x87);
 
-        assert!(apu.ch2.enabled);
-        assert_eq!(apu.ch2.duty_position, 0);
-        assert_eq!(apu.ch2.freq_timer, 1024);
+        assert!(apu.ch2.active);
+    }
 
-        // Step 1024 T-cycles (256 M-cycles) to expire the timer once and advance duty_position
-        apu.step(0); // no-op, just to be safe
-                     // 256 M-cycles = 1024 T-cycles → freq_timer hits 0, duty_position goes from 0 to 1
-        for _ in 0..256 {
+    #[test]
+    fn end_frame_produces_nonzero_samples() {
+        let mut apu = Apu::new(44100);
+
+        // Power on APU
+        apu.write_byte(0xFF26, 0x80);
+        // Enable CH2 on both outputs, master volume max
+        apu.write_byte(0xFF25, 0x22);
+        apu.write_byte(0xFF24, 0x77);
+        // NR21: duty 50%, length 0
+        apu.write_byte(0xFF16, 0x80);
+        // NR22: volume 15, no envelope
+        apu.write_byte(0xFF17, 0xF0);
+        // NR23: freq low
+        apu.write_byte(0xFF18, 0x00);
+        // NR24: trigger + freq high = 6
+        apu.write_byte(0xFF19, 0x86);
+
+        // Run enough cycles for one frame
+        for _ in 0..17556 {
             apu.step(1);
         }
 
-        assert_eq!(apu.ch2.duty_position, 1);
-        // duty 50% position 1 = 0, so amplitude should be 0
-        assert_eq!(apu.ch2.last_amp, 0);
-
-        // Step another 1024 T-cycles → duty_position goes to 2
-        for _ in 0..256 {
-            apu.step(1);
-        }
-
-        assert_eq!(apu.ch2.duty_position, 2);
-
-        // Step two more periods → duty_position 3, then 4
-        for _ in 0..512 {
-            apu.step(1);
-        }
-
-        assert_eq!(apu.ch2.duty_position, 4);
-        // duty 50% position 4 = 1, volume 15 → amplitude = 1 * 15 * 256 = 3840
-        assert_eq!(apu.ch2.last_amp, 3840);
+        let samples = apu.end_frame();
+        assert!(!samples.is_empty(), "end_frame should produce samples");
+        assert!(
+            samples.iter().any(|&s| s != 0.0),
+            "end_frame should produce non-zero samples when a channel is active"
+        );
     }
 
     #[test]
     fn blargg_01_register_roundtrip() {
         let masks: [(u16, u8); 22] = [
-            (0xFF10, 0x80), (0xFF11, 0x3F), (0xFF12, 0x00), (0xFF13, 0xFF), (0xFF14, 0xBF),
-            (0xFF15, 0xFF), (0xFF16, 0x3F), (0xFF17, 0x00), (0xFF18, 0xFF), (0xFF19, 0xBF),
-            (0xFF1A, 0x7F), (0xFF1B, 0xFF), (0xFF1C, 0x9F), (0xFF1D, 0xFF), (0xFF1E, 0xBF),
-            (0xFF1F, 0xFF), (0xFF20, 0xFF), (0xFF21, 0x00), (0xFF22, 0x00), (0xFF23, 0xBF),
-            (0xFF24, 0x00), (0xFF25, 0x00),
-            // NR52 skipped by the test
-            // Wave RAM tested separately with mask 0x00
+            (0xFF10, 0x80),
+            (0xFF11, 0x3F),
+            (0xFF12, 0x00),
+            (0xFF13, 0xFF),
+            (0xFF14, 0xBF),
+            (0xFF15, 0xFF),
+            (0xFF16, 0x3F),
+            (0xFF17, 0x00),
+            (0xFF18, 0xFF),
+            (0xFF19, 0xBF),
+            (0xFF1A, 0x7F),
+            (0xFF1B, 0xFF),
+            (0xFF1C, 0x9F),
+            (0xFF1D, 0xFF),
+            (0xFF1E, 0xBF),
+            (0xFF1F, 0xFF),
+            (0xFF20, 0xFF),
+            (0xFF21, 0x00),
+            (0xFF22, 0x00),
+            (0xFF23, 0xBF),
+            (0xFF24, 0x00),
+            (0xFF25, 0x00),
         ];
 
         let mut apu = Apu::new(44100);
@@ -641,381 +971,6 @@ mod tests {
                     "Wave RAM {:#06X} with d={:#04X}: expected {:#04X}, got {:#04X}",
                     addr, d, d, actual
                 );
-            }
-        }
-    }
-}
-
-struct SquareChannel {
-    duty_cycle: u8,
-    length_load: u8,
-    length_timer: u8,
-    initial_volume: u8,
-    env_add_mode: bool,
-    env_period: u8,
-    env_timer: u8,
-    freq_low: u8,
-    freq_high: u8,
-    length_enable: bool,
-
-    enabled: bool,
-    dac_enabled: bool,
-    freq_timer: u16,
-    duty_position: u8,
-    current_volume: u8,
-    last_amp: i32,
-
-    sweep_period: u8,
-    sweep_shift: u8,
-    sweep_negate: bool,
-    sweep_timer: u8,
-    sweep_enabled: bool,
-    sweep_has_negated: bool, // set when negate mode is used in a calculation
-    shadow_freq: u16,        // internal copy of frequency used for sweep calculations
-}
-
-impl SquareChannel {
-    fn new() -> Self {
-        Self {
-            duty_cycle: 0,
-            length_load: 0,
-            length_timer: 0,
-            initial_volume: 0,
-            env_add_mode: false,
-            env_period: 0,
-            env_timer: 0,
-            freq_low: 0,
-            freq_high: 0,
-            length_enable: false,
-
-            enabled: false,
-            dac_enabled: false,
-            freq_timer: 0,
-            duty_position: 0,
-            current_volume: 0,
-            last_amp: 0,
-
-            sweep_period: 0,
-            sweep_shift: 0,
-            sweep_negate: false,
-            sweep_timer: 0,
-            sweep_enabled: false,
-            sweep_has_negated: false,
-            shadow_freq: 0,
-        }
-    }
-
-    fn tick(&mut self) -> Option<i32> {
-        if self.freq_timer > 0 {
-            self.freq_timer -= 1;
-        }
-
-        if self.freq_timer == 0 {
-            let freq = (self.freq_high as u16) << 8 | self.freq_low as u16;
-            self.freq_timer = (2048 - freq) * 4;
-            self.duty_position = (self.duty_position + 1) & 7;
-        }
-
-        let amplitude: i32 = if self.enabled && self.dac_enabled {
-            let duty = DUTY_TABLE[self.duty_cycle as usize][self.duty_position as usize] as i32;
-            duty * self.current_volume as i32 * 256
-        } else {
-            0
-        };
-
-        if amplitude != self.last_amp {
-            let amp_delta = amplitude - self.last_amp;
-            self.last_amp = amplitude;
-
-            return Some(amp_delta);
-        }
-
-        None
-    }
-
-    fn clock_length(&mut self) {
-        if self.length_enable && self.length_timer > 0 {
-            self.length_timer -= 1;
-
-            if self.length_timer == 0 {
-                self.enabled = false;
-            }
-        }
-    }
-
-    fn clock_envelope(&mut self) {
-        if self.env_period == 0 {
-            return;
-        }
-
-        if self.env_timer > 0 {
-            self.env_timer -= 1;
-        }
-
-        if self.env_timer == 0 {
-            self.env_timer = self.env_period;
-
-            if self.env_add_mode {
-                if self.current_volume < 15 {
-                    self.current_volume += 1;
-                }
-            }
-
-            if !self.env_add_mode {
-                if self.current_volume > 0 {
-                    self.current_volume -= 1;
-                }
-            }
-        }
-    }
-
-    fn clock_sweep(&mut self) {
-        if !self.sweep_enabled {
-            return;
-        }
-
-        if self.sweep_timer > 0 {
-            self.sweep_timer -= 1;
-        }
-
-        if self.sweep_timer == 0 {
-            self.sweep_timer = if self.sweep_period > 0 {
-                self.sweep_period
-            } else {
-                8
-            };
-
-            if self.sweep_period > 0 {
-                if self.sweep_negate {
-                    self.sweep_has_negated = true;
-                }
-
-                let new_freq = if self.sweep_negate {
-                    self.shadow_freq.wrapping_sub(self.shadow_freq >> self.sweep_shift)
-                } else {
-                    self.shadow_freq + (self.shadow_freq >> self.sweep_shift)
-                };
-
-                if new_freq > 2047 {
-                    self.enabled = false;
-                } else if self.sweep_shift != 0 {
-                    self.shadow_freq = new_freq;
-                    self.freq_low = (new_freq & 0xFF) as u8;
-                    self.freq_high = ((new_freq >> 8) & 0x07) as u8;
-
-                    // Second overflow check with updated frequency
-                    let second_freq = if self.sweep_negate {
-                        self.shadow_freq.wrapping_sub(self.shadow_freq >> self.sweep_shift)
-                    } else {
-                        self.shadow_freq + (self.shadow_freq >> self.sweep_shift)
-                    };
-                    if second_freq > 2047 {
-                        self.enabled = false;
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct WaveChannel {
-    dac_enabled: bool,
-    length_load: u16,
-    length_timer: u16,
-    length_enable: bool,
-    volume_code: u8,
-    freq_low: u8,
-    freq_high: u8,
-    enabled: bool,
-    freq_timer: u16,
-    position: u8,
-    sample_buffer: u8,
-    wave_ram: [u8; 16],
-    last_amp: i32,
-    sample_time: u32, // T-cycle when wave RAM was last accessed by the channel
-}
-
-impl WaveChannel {
-    pub fn new() -> Self {
-        Self {
-            dac_enabled: false,
-            length_load: 0,
-            length_timer: 0,
-            length_enable: false,
-            volume_code: 0,
-            freq_low: 0,
-            freq_high: 0,
-            enabled: false,
-            freq_timer: 0,
-            position: 0,
-            sample_buffer: 0,
-            wave_ram: [0; 16],
-            last_amp: 0,
-            sample_time: 0,
-        }
-    }
-
-    fn tick(&mut self, t_clock: u32) -> Option<i32> {
-        if self.freq_timer > 0 {
-            self.freq_timer -= 1;
-        }
-
-        if self.freq_timer == 0 {
-            let freq = (self.freq_high as u16) << 8 | self.freq_low as u16;
-            self.freq_timer = (2048 - freq) * 2;
-            self.position = (self.position + 1) & 31;
-            self.sample_time = t_clock; // record when wave RAM was accessed
-
-            let nibble = self.wave_ram[self.position as usize / 2];
-            if self.position % 2 == 0 {
-                self.sample_buffer = nibble >> 4;
-            } else {
-                self.sample_buffer = nibble & 0x0F;
-            }
-        }
-
-        let amplitude: i32 = if self.enabled && self.dac_enabled {
-            let volume_shift = match self.volume_code {
-                0 => 4, // mute (shift right 4 = effectively 0)
-                1 => 0, // 100%
-                2 => 1, // 50%
-                3 => 2, // 25%
-                _ => 4,
-            };
-            (self.sample_buffer >> volume_shift) as i32 * 256
-        } else {
-            0
-        };
-
-        if amplitude != self.last_amp {
-            let amp_delta = amplitude - self.last_amp;
-            self.last_amp = amplitude;
-            return Some(amp_delta);
-        }
-
-        None
-    }
-
-    fn clock_length(&mut self) {
-        if self.length_enable && self.length_timer > 0 {
-            self.length_timer -= 1;
-
-            if self.length_timer == 0 {
-                self.enabled = false;
-            }
-        }
-    }
-}
-
-struct NoiseChannel {
-    length_load: u8,
-    length_timer: u8,
-    length_enable: bool,
-    initial_volume: u8,
-    env_add_mode: bool,
-    env_period: u8,
-    env_timer: u8,
-    current_volume: u8,
-    clock_shift: u8,
-    width_mode: bool,
-    divisor_code: u8,
-    enabled: bool,
-    dac_enabled: bool,
-    freq_timer: u16,
-    lfsr: u16,
-    last_amp: i32,
-}
-
-impl NoiseChannel {
-    pub fn new() -> Self {
-        Self {
-            length_load: 0,
-            length_timer: 0,
-            length_enable: false,
-            initial_volume: 0,
-            env_add_mode: false,
-            env_period: 0,
-            env_timer: 0,
-            current_volume: 0,
-            clock_shift: 0,
-            width_mode: false,
-            divisor_code: 0,
-            enabled: false,
-            dac_enabled: false,
-            freq_timer: 0,
-            lfsr: 0,
-            last_amp: 0,
-        }
-    }
-
-    fn tick(&mut self) -> Option<i32> {
-        if self.freq_timer > 0 {
-            self.freq_timer -= 1;
-        }
-
-        if self.freq_timer == 0 {
-            self.freq_timer = DIVISOR_TABLE[self.divisor_code as usize] << self.clock_shift;
-
-            let xor_result = (self.lfsr & 0x01) ^ ((self.lfsr >> 1) & 0x01);
-            self.lfsr = (self.lfsr >> 1) | (xor_result << 14);
-
-            if self.width_mode {
-                self.lfsr = self.lfsr | (xor_result << 6);
-            }
-        }
-
-        let amplitude: i32 = if self.enabled && self.dac_enabled {
-            if self.lfsr & 0x01 == 0 {
-                self.current_volume as i32 * 256
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        if amplitude != self.last_amp {
-            let amp_delta = amplitude - self.last_amp;
-            self.last_amp = amplitude;
-
-            return Some(amp_delta);
-        }
-
-        None
-    }
-
-    fn clock_length(&mut self) {
-        if self.length_enable && self.length_timer > 0 {
-            self.length_timer -= 1;
-
-            if self.length_timer == 0 {
-                self.enabled = false;
-            }
-        }
-    }
-
-    fn clock_envelope(&mut self) {
-        if self.env_period == 0 {
-            return;
-        }
-
-        if self.env_timer > 0 {
-            self.env_timer -= 1;
-        }
-
-        if self.env_timer == 0 {
-            self.env_timer = self.env_period;
-
-            if self.env_add_mode {
-                if self.current_volume < 15 {
-                    self.current_volume += 1;
-                }
-            }
-
-            if !self.env_add_mode {
-                if self.current_volume > 0 {
-                    self.current_volume -= 1;
-                }
             }
         }
     }

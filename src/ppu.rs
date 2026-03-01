@@ -118,7 +118,8 @@ impl Ppu {
     pub fn update_ly(&mut self, cycles: u8) -> u8 {
         let mut bitmask: u8 = 0;
 
-        self.ly_cycles += cycles as u16;
+        // CPU passes M-cycles; PPU timings use T-cycles (1 M-cycle = 4 T-cycles)
+        self.ly_cycles += cycles as u16 * 4;
 
         let mode_before = self.mode;
 

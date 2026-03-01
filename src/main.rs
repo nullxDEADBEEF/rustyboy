@@ -8,7 +8,8 @@ mod register;
 mod serial;
 mod timer;
 
-use std::{env, path::Path};
+use std::env;
+use std::path::Path;
 
 use crate::gameboy::Gameboy;
 
@@ -16,33 +17,39 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device,
 };
+use ringbuf::{traits::*, HeapRb};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<i16>>(4);
-
     let audio_device = get_audio_device();
 
     let audio_config = if let Ok(config) = audio_device.default_output_config() {
-        config.config()
+        let channels = config.channels();
+        let sample_rate = config.sample_rate();
+        (channels, sample_rate, config.config())
     } else {
         panic!("Could not get audio output config");
     };
 
+    let (_channels, sample_rate, stream_config) = audio_config;
+    let sample_rate_u32: u32 = sample_rate.into();
+
+    // Lock-free SPSC ring buffer sized for ~100ms of stereo audio.
+    // At 48kHz stereo: 48000 * 2 * 0.1 = 9600 samples.
+    // Use a power-of-two-friendly size for good ring buffer performance.
+    let ring_buf_size = (sample_rate_u32 as usize) * 2 / 5; // ~200ms worth, generous headroom
+    let rb = HeapRb::<f32>::new(ring_buf_size);
+    let (producer, mut consumer) = rb.split();
+
     let _stream = audio_device
         .build_output_stream(
-            &audio_config,
+            &stream_config,
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let samples = receiver.try_recv().unwrap_or_default();
-                let mut sample_iter = samples.iter();
-
-                for out in output.iter_mut() {
-                    if let Some(&sample) = sample_iter.next() {
-                        *out = sample as f32 / 32768.0;
-                    } else {
-                        *out = 0.0;
-                    }
+                let filled = consumer.pop_slice(output);
+                // Fill any remaining output with silence to avoid noise on underrun
+                for sample in &mut output[filled..] {
+                    *sample = 0.0;
                 }
             },
             |err| eprintln!("Audio stream error: {}", err),
@@ -54,7 +61,7 @@ fn main() {
 
     match args.len() {
         2 => {
-            let mut gameboy = Gameboy::new(Path::new(&args[1]), audio_config.sample_rate, sender);
+            let mut gameboy = Gameboy::new(Path::new(&args[1]), sample_rate_u32, producer);
             gameboy.run();
         }
         _ => eprintln!("Usage: cargo run <ROM>"),

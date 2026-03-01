@@ -1,6 +1,7 @@
-use std::{path::Path, sync::mpsc::SyncSender};
+use std::path::Path;
 
 use minifb::{Key, Window, WindowOptions};
+use ringbuf::{traits::*, HeapProd};
 
 use crate::cpu::Cpu;
 
@@ -9,14 +10,14 @@ const HEIGHT: usize = 144;
 
 pub struct Gameboy {
     pub cpu: Cpu,
-    sample_sender: SyncSender<Vec<i16>>,
+    audio_producer: HeapProd<f32>,
 }
 
 impl Gameboy {
-    pub fn new(rom_file: &Path, sample_rate: u32, sample_sender: SyncSender<Vec<i16>>) -> Self {
+    pub fn new(rom_file: &Path, sample_rate: u32, audio_producer: HeapProd<f32>) -> Self {
         Self {
             cpu: Cpu::new(rom_file, sample_rate),
-            sample_sender,
+            audio_producer,
         }
     }
 
@@ -29,29 +30,28 @@ impl Gameboy {
         let mut window = Window::new("Rustyboy", WIDTH, HEIGHT, window_options)
             .unwrap_or_else(|e| panic!("{}", e));
 
-        let mut frame_count = 0u32;
-        let mut last_result = 0xFFu8;
+        // Disable minifb's built-in rate limiter — we sync to audio instead
+        window.limit_update_rate(None);
+
+        let buffer_capacity = self.audio_producer.capacity().get();
+        // Wait when buffer is more than half full
+        let high_water = buffer_capacity / 2;
+
         while window.is_open() && !window.is_key_down(Key::Escape) {
             let cycles_per_frame = 17556; // ~4.19 MHz / 60 FPS
-            let mut cycles_run = 0;
+            let mut cycles_run = 0u32;
             while cycles_run < cycles_per_frame {
                 cycles_run += self.cpu.run_cycle() as u32;
             }
-            let samples = self.cpu.bus.apu.end_frame();
-            let _ = self.sample_sender.try_send(samples);
 
-            frame_count += 1;
-            // Debug: check Blargg test result at 0xA000
-            let result = self.cpu.bus.read_byte(0xA000);
-            if result != last_result {
-                last_result = result;
-                let mut text = String::new();
-                for i in 0..200 {
-                    let ch = self.cpu.bus.read_byte(0xA004 + i);
-                    if ch == 0 { break; }
-                    text.push(ch as char);
-                }
-                eprintln!("Frame {}: Blargg code={:#04X} text={}", frame_count, result, text);
+            let samples = self.cpu.bus.apu.end_frame();
+            self.audio_producer.push_slice(&samples);
+
+            // Audio-driven sync: wait for the audio callback to drain the buffer
+            // before producing more. This locks the emulator to the audio device's
+            // real-time clock, preventing both overrun (crackling) and underrun (gaps).
+            while self.audio_producer.occupied_len() > high_water {
+                std::thread::yield_now();
             }
 
             window
