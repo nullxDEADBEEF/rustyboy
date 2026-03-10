@@ -39,11 +39,18 @@ impl Gameboy {
 
         while window.is_open() && !window.is_key_down(Key::Escape) {
             self.check_joypad_state(&window);
-            let cycles_per_frame = 17556; // ~4.19 MHz / 60 FPS
-            let mut cycles_run = 0u32;
-            while cycles_run < cycles_per_frame {
-                cycles_run += self.cpu.run_cycle() as u32;
+
+            let mut vblank_hit = false;
+            while !vblank_hit {
+                let flags = self.cpu.run_cycle();
+                if flags & 0x01 != 0 {
+                    vblank_hit = true;
+                }
             }
+
+            window
+                .update_with_buffer(&self.cpu.bus.ppu.frame_buffer, WIDTH, HEIGHT)
+                .unwrap();
 
             let samples = self.cpu.bus.apu.end_frame();
             self.audio_producer.push_slice(&samples);
@@ -55,9 +62,6 @@ impl Gameboy {
                 std::thread::yield_now();
             }
 
-            window
-                .update_with_buffer(&self.cpu.bus.ppu.frame_buffer, WIDTH, HEIGHT)
-                .unwrap();
         }
     }
 

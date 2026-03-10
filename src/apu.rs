@@ -2,7 +2,7 @@ use blip_buf::BlipBuf;
 
 const CLOCKS_PER_SECOND: u32 = 4_194_304;
 const CLOCKS_PER_FRAME: u32 = CLOCKS_PER_SECOND / 512;
-const OUTPUT_SAMPLE_COUNT: usize = 2000;
+const OUTPUT_SAMPLE_COUNT: usize = 5500;
 
 const DUTY_TABLE: [[i32; 8]; 4] = [
     [-1, -1, -1, -1, 1, -1, -1, -1], // 12.5%
@@ -30,7 +30,7 @@ pub struct Apu {
 }
 
 fn create_blipbuf(sample_rate: u32) -> BlipBuf {
-    let mut blipbuf = BlipBuf::new(OUTPUT_SAMPLE_COUNT as u32 + 1);
+    let mut blipbuf = BlipBuf::new(OUTPUT_SAMPLE_COUNT as u32 * (190385 / 70224));
     blipbuf.set_rates(CLOCKS_PER_SECOND as f64, sample_rate as f64);
     blipbuf
 }

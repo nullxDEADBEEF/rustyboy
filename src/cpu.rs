@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::{bus::Bus, register::Flags, register::Register};
+use crate::{bus::Bus, register::{Flags, Register}};
 
 // memory interface can address up to 65536 bytes (16-bit bus)
 // programs are accessed through the same address bus as normal memory
@@ -2583,6 +2583,8 @@ impl Cpu {
     }
 
     pub fn run_cycle(&mut self) -> u8 {
+        let mut ppu_flags = 0;
+
         // handle delayed EI
         if self.enable_ime_next {
             self.ime = true;
@@ -2591,7 +2593,8 @@ impl Cpu {
 
         if self.halted {
             self.m = 1;
-            self.bus.if_ |= self.bus.ppu.update_ly(self.m);
+            ppu_flags = self.bus.ppu.update_ly(self.m);
+            self.bus.if_ |= ppu_flags;
             self.bus.timer.update(self.m);
             self.bus.apu.step(self.m);
 
@@ -2610,7 +2613,7 @@ impl Cpu {
                     self.handle_interrupts(true);
                 }
             }
-            return self.m;
+            return ppu_flags & 0x01;
         }
 
         if self.stopped {
@@ -2638,7 +2641,8 @@ impl Cpu {
             self.decode_execute();
             //self.print_register_data();
 
-            self.bus.if_ |= self.bus.ppu.update_ly(self.m);
+            ppu_flags = self.bus.ppu.update_ly(self.m);
+            self.bus.if_ |= ppu_flags;
             self.bus.timer.update(self.m);
             self.bus.apu.step(self.m);
 
@@ -2651,7 +2655,9 @@ impl Cpu {
                 self.bus.if_ |= 0x08;
             }
         }
-        self.m
+
+
+        ppu_flags & 0x01
     }
 
     fn halt(&mut self) {
